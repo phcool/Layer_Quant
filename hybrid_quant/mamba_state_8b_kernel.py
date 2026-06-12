@@ -503,9 +503,7 @@ def register_mamba_state_kernel_caches(model, cache_params, mode_by_layer: dict[
         )
     model._mamba_decode_state_kernel_caches = caches
     module = __import__(model.__class__.__module__, fromlist=["selective_state_update"])
-    global_caches = getattr(module, "_mamba_decode_state_kernel_caches", {})
-    global_caches.update(caches)
-    module._mamba_decode_state_kernel_caches = global_caches
+    module._mamba_decode_state_kernel_caches = dict(caches)
     model._mamba_decode_state_kernel_meta = {
         layer_idx: SimpleNamespace(
             mode=mode_by_layer[layer_idx],
