@@ -44,10 +44,15 @@ def main() -> None:
     ref = F.scaled_dot_product_attention(q, k_ref, v_ref, is_causal=False).squeeze(2)
 
     diff = (out.float() - ref.float()).abs()
+    projected_layout = out.unsqueeze(2).transpose(1, 2).contiguous().view(batch, 1, q_heads * head_dim)
+    ref_layout = ref.unsqueeze(2).transpose(1, 2).contiguous().view(batch, 1, q_heads * head_dim)
+    layout_diff = (projected_layout.float() - ref_layout.float()).abs()
     print(
         {
             "max_abs": diff.max().item(),
             "mean_abs": diff.mean().item(),
+            "layout_max_abs": layout_diff.max().item(),
+            "layout_mean_abs": layout_diff.mean().item(),
             "ref_abs_mean": ref.float().abs().mean().item(),
             "out_abs_mean": out.float().abs().mean().item(),
         }

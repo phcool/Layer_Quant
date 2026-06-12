@@ -633,7 +633,7 @@ def _forward_fused_int4_kv(
             self.num_key_value_groups,
             group_size,
         )
-        attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.unsqueeze(2).transpose(1, 2).contiguous().view(bsz, q_len, self.hidden_size)
         attn_output = self.o_proj(attn_output)
         return attn_output, None, past_key_value
 
