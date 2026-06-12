@@ -57,6 +57,8 @@ def run_one(
     *,
     repo: str,
     dataset: str,
+    kv_quantization: str,
+    state_quantization: str,
     batch_size: int,
     sequence_length: int,
     decode_steps: int,
@@ -76,12 +78,14 @@ def run_one(
             torch_dtype=torch.bfloat16,
         ).cuda().eval()
         patch_attention_cache_in_blocks(model)
-        patch_nemotron_h_attention_int4_kv(model, group_size=kv_group_size)
-        patch_nemotron_h_mamba_decode_state_kernel(model, group_size=16, stochastic=True, seed=seed)
+        if kv_quantization == "int4":
+            patch_nemotron_h_attention_int4_kv(model, group_size=kv_group_size)
+        if state_quantization == "mx8":
+            patch_nemotron_h_mamba_decode_state_kernel(model, group_size=16, stochastic=True, seed=seed)
 
         config = AutoConfig.from_pretrained(repo, trust_remote_code=True)
         mamba_layers, attention_layers, mlp_layers = layer_groups(config)
-        mode_by_layer = {idx: "mx8" for idx in mamba_layers}
+        mode_by_layer = {idx: "mx8" for idx in mamba_layers} if state_quantization == "mx8" else {}
         ids = make_batch_ids(repo, dataset, batch_size, sequence_length, warmup_steps + decode_steps).to(device)
         cache = make_hybrid_cache(model, batch_size=batch_size)
 
@@ -95,7 +99,8 @@ def run_one(
                 use_cache=True,
                 return_dict=True,
             )
-            register_mamba_state_kernel_caches(model, cache, mode_by_layer)
+            if state_quantization == "mx8":
+                register_mamba_state_kernel_caches(model, cache, mode_by_layer)
             torch.cuda.synchronize(device)
             prefill_latency_s = time.perf_counter() - prefill_start
 
@@ -135,8 +140,8 @@ def run_one(
             "decode_steps": decode_steps,
             "warmup_steps": warmup_steps,
             "status": "ok",
-            "kv_quantization": "int4",
-            "state_quantization": "mx8",
+            "kv_quantization": kv_quantization,
+            "state_quantization": state_quantization,
             "prefill_latency_s": prefill_latency_s,
             "decode_total_s": decode_total_s,
             "decode_ms_per_step": decode_total_s * 1000.0 / decode_steps,
@@ -194,47 +199,78 @@ def main() -> None:
     parser.add_argument("--decode-steps", type=int, default=32)
     parser.add_argument("--warmup-steps", type=int, default=4)
     parser.add_argument("--kv-group-size", type=int, default=64)
+    parser.add_argument(
+        "--quantization-modes",
+        default="none,kv_int4,state_mx8,kv_int4_state_mx8",
+        help="Comma-separated modes: none, kv_int4, state_mx8, kv_int4_state_mx8.",
+    )
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--output", default="results/latency/nemotron_8b_int4kv_mx8state_seq2048_latency.csv")
+    parser.add_argument("--output", default="results/latency/nemotron_8b_seq2048_latency.csv")
     args = parser.parse_args()
 
+    quantization_modes = {
+        "none": ("none", "none"),
+        "kv_int4": ("int4", "none"),
+        "state_mx8": ("none", "mx8"),
+        "kv_int4_state_mx8": ("int4", "mx8"),
+    }
+    selected_modes = [item.strip() for item in args.quantization_modes.split(",") if item.strip()]
+    invalid_modes = sorted(set(selected_modes) - set(quantization_modes))
+    if invalid_modes:
+        raise ValueError(f"Unknown quantization modes: {invalid_modes}; valid modes are {sorted(quantization_modes)}")
+
     rows: list[dict] = []
-    for batch_size in parse_steps(args.batch_sizes):
-        print(json.dumps({"event": "start_batch", "batch_size": batch_size}), flush=True)
-        try:
-            row = run_one(
-                repo=args.repo,
-                dataset=args.dataset,
-                batch_size=batch_size,
-                sequence_length=args.sequence_length,
-                decode_steps=args.decode_steps,
-                warmup_steps=args.warmup_steps,
-                kv_group_size=args.kv_group_size,
-                seed=args.seed,
+    for mode in selected_modes:
+        kv_quantization, state_quantization = quantization_modes[mode]
+        for batch_size in parse_steps(args.batch_sizes):
+            print(
+                json.dumps(
+                    {
+                        "event": "start_batch",
+                        "mode": mode,
+                        "kv_quantization": kv_quantization,
+                        "state_quantization": state_quantization,
+                        "batch_size": batch_size,
+                    }
+                ),
+                flush=True,
             )
-        except torch.cuda.OutOfMemoryError as exc:
-            torch.cuda.empty_cache()
-            row = {
-                "batch_size": batch_size,
-                "sequence_length": args.sequence_length,
-                "decode_steps": args.decode_steps,
-                "warmup_steps": args.warmup_steps,
-                "status": "oom",
-                "kv_quantization": "int4",
-                "state_quantization": "mx8",
-                "prefill_latency_s": "",
-                "decode_total_s": "",
-                "decode_ms_per_step": "",
-                "decode_ms_per_token": "",
-                "tokens_per_s": "",
-                "step_p50_ms": "",
-                "step_p90_ms": "",
-                "peak_memory_gib": "",
-                "error": str(exc).splitlines()[0],
-            }
-        rows.append(row)
-        write_csv(Path(args.output), rows)
-        print(json.dumps({"event": "batch_result", **row}), flush=True)
+            try:
+                row = run_one(
+                    repo=args.repo,
+                    dataset=args.dataset,
+                    kv_quantization=kv_quantization,
+                    state_quantization=state_quantization,
+                    batch_size=batch_size,
+                    sequence_length=args.sequence_length,
+                    decode_steps=args.decode_steps,
+                    warmup_steps=args.warmup_steps,
+                    kv_group_size=args.kv_group_size,
+                    seed=args.seed,
+                )
+            except torch.cuda.OutOfMemoryError as exc:
+                torch.cuda.empty_cache()
+                row = {
+                    "batch_size": batch_size,
+                    "sequence_length": args.sequence_length,
+                    "decode_steps": args.decode_steps,
+                    "warmup_steps": args.warmup_steps,
+                    "status": "oom",
+                    "kv_quantization": kv_quantization,
+                    "state_quantization": state_quantization,
+                    "prefill_latency_s": "",
+                    "decode_total_s": "",
+                    "decode_ms_per_step": "",
+                    "decode_ms_per_token": "",
+                    "tokens_per_s": "",
+                    "step_p50_ms": "",
+                    "step_p90_ms": "",
+                    "peak_memory_gib": "",
+                    "error": str(exc).splitlines()[0],
+                }
+            rows.append(row)
+            write_csv(Path(args.output), rows)
+            print(json.dumps({"event": "batch_result", "mode": mode, **row}), flush=True)
 
     print(json.dumps({"event": "outputs", "csv": args.output}), flush=True)
 
