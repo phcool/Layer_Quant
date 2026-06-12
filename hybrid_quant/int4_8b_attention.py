@@ -623,9 +623,6 @@ def _forward_fused_int4_kv(
     )
     _pack_kv_into_cache(layer_cache, key_states, value_states, positions, group_size)
 
-    if attention_mask is not None:
-        raise NotImplementedError("Fused INT4 KV attention currently expects unmasked contiguous decode inputs.")
-
     if q_len == 1:
         attn_output = _decode_attention(
             query_states,
