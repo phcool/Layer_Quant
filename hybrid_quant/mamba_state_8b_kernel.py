@@ -107,8 +107,8 @@ def _state_update_mx8_kernel(
         + offs_m[:, None] * stride_q_dim
         + offs_n[None, :] * stride_q_dstate
     )
-    block_ids = offs_n // MX8_BLOCK_SIZE
-    pair_ids = offs_n // MX8_PAIR_SIZE
+    block_ids = offs_n // 16
+    pair_ids = offs_n // 2
     exp_ptrs = (
         shared_exp_ptr
         + pid_b * stride_exp_batch
@@ -202,11 +202,11 @@ def _requantize_mx8_kernel(
     RNG_SEED: tl.constexpr,
     RNG_OFFSET: tl.constexpr,
 ):
-    groups_per_row: tl.constexpr = dstate // MX8_BLOCK_SIZE
+    groups_per_row: tl.constexpr = dstate // 16
     pid = tl.program_id(0)
     row = pid // groups_per_row
     group = pid - row * groups_per_row
-    offs = group * MX8_BLOCK_SIZE + tl.arange(0, MX8_BLOCK_SIZE)
+    offs = group * 16 + tl.arange(0, 16)
     vals = tl.load(state_ptr + row * dstate + offs).to(tl.float32)
     abs_vals = tl.abs(vals)
     amax = tl.max(abs_vals, axis=0)
@@ -214,27 +214,26 @@ def _requantize_mx8_kernel(
     biased_exp = tl.minimum(tl.maximum(raw_exp + 127.0, 1.0), 254.0)
     base_scale = tl.where(amax == 0.0, 1.0, tl.exp2(biased_exp - 127.0))
 
-    pair_ids = tl.arange(0, MX8_BLOCK_SIZE) // MX8_PAIR_SIZE
-    even_vals = tl.reshape(vals, (MX8_BLOCK_SIZE // MX8_PAIR_SIZE, MX8_PAIR_SIZE))
+    even_vals = tl.reshape(vals, (8, 2))
     pair_amax = tl.max(tl.abs(even_vals), axis=1)
-    micro_vec = tl.where(pair_amax > MX8_MANTISSA_MAX * base_scale, 1, 0)
-    micro_pairs = tl.reshape(tl.broadcast_to(tl.expand_dims(micro_vec, 1), (MX8_BLOCK_SIZE // MX8_PAIR_SIZE, MX8_PAIR_SIZE)), (MX8_BLOCK_SIZE,))
+    micro_vec = tl.where(pair_amax > 63.0 * base_scale, 1, 0)
+    micro_pairs = tl.reshape(tl.broadcast_to(tl.expand_dims(micro_vec, 1), (8, 2)), (16,))
     micro = micro_pairs
     scale = base_scale * tl.exp2(micro.to(tl.float32))
-    q_abs = tl.minimum(abs_vals / scale, MX8_MANTISSA_MAX)
+    q_abs = tl.minimum(abs_vals / scale, 63.0)
     q_floor = tl.floor(q_abs)
     if STOCHASTIC:
         rnd = tl.rand(RNG_SEED, RNG_OFFSET + row * dstate + offs)
         q_level = q_floor + (rnd < (q_abs - q_floor)).to(tl.float32)
     else:
         q_level = tl.floor(q_abs + 0.5)
-    q_level = tl.minimum(q_level, MX8_MANTISSA_MAX)
+    q_level = tl.minimum(q_level, 63.0)
     q_signed = tl.where(vals < 0.0, -q_level, q_level).to(tl.int8)
 
     tl.store(q_state_ptr + row * dstate + offs, q_signed)
     tl.store(shared_exp_ptr + row * groups_per_row + group, biased_exp.to(tl.uint8))
     tl.store(
-        micro_exp_ptr + row * (dstate // MX8_PAIR_SIZE) + group * (MX8_BLOCK_SIZE // MX8_PAIR_SIZE) + tl.arange(0, MX8_BLOCK_SIZE // MX8_PAIR_SIZE),
+        micro_exp_ptr + row * (dstate // 2) + group * 8 + tl.arange(0, 8),
         micro_vec.to(tl.uint8),
     )
 
@@ -251,43 +250,43 @@ def _requantize_mx4_kernel(
     RNG_SEED: tl.constexpr,
     RNG_OFFSET: tl.constexpr,
 ):
-    groups_per_row: tl.constexpr = dstate // MX4_BLOCK_SIZE
+    groups_per_row: tl.constexpr = dstate // 16
     pid = tl.program_id(0)
     row = pid // groups_per_row
     group = pid - row * groups_per_row
-    offs = group * MX4_BLOCK_SIZE + tl.arange(0, MX4_BLOCK_SIZE)
+    offs = group * 16 + tl.arange(0, 16)
     vals = tl.load(state_ptr + row * dstate + offs).to(tl.float32)
     abs_vals = tl.abs(vals)
     amax = tl.max(abs_vals, axis=0)
-    raw_exp = tl.ceil(tl.log2(tl.maximum(amax / (2.0 * MX4_MANTISSA_MAX), 1.0e-30)))
+    raw_exp = tl.ceil(tl.log2(tl.maximum(amax / 14.0, 1.0e-30)))
     biased_exp = tl.minimum(tl.maximum(raw_exp + 127.0, 1.0), 254.0)
     base_scale = tl.where(amax == 0.0, 1.0, tl.exp2(biased_exp - 127.0))
 
-    even_vals = tl.reshape(vals, (MX4_BLOCK_SIZE // MX4_PAIR_SIZE, MX4_PAIR_SIZE))
+    even_vals = tl.reshape(vals, (8, 2))
     pair_amax = tl.max(tl.abs(even_vals), axis=1)
-    micro_vec = tl.where(pair_amax > MX4_MANTISSA_MAX * base_scale, 1, 0)
+    micro_vec = tl.where(pair_amax > 7.0 * base_scale, 1, 0)
     micro_pairs = tl.reshape(
-        tl.broadcast_to(tl.expand_dims(micro_vec, 1), (MX4_BLOCK_SIZE // MX4_PAIR_SIZE, MX4_PAIR_SIZE)),
-        (MX4_BLOCK_SIZE,),
+        tl.broadcast_to(tl.expand_dims(micro_vec, 1), (8, 2)),
+        (16,),
     )
     scale = base_scale * tl.exp2(micro_pairs.to(tl.float32))
-    q_abs = tl.minimum(abs_vals / scale, MX4_MANTISSA_MAX)
+    q_abs = tl.minimum(abs_vals / scale, 7.0)
     q_floor = tl.floor(q_abs)
     if STOCHASTIC:
         rnd = tl.rand(RNG_SEED, RNG_OFFSET + row * dstate + offs)
         q_level = q_floor + (rnd < (q_abs - q_floor)).to(tl.float32)
     else:
         q_level = tl.floor(q_abs + 0.5)
-    q_level = tl.minimum(q_level, MX4_MANTISSA_MAX)
+    q_level = tl.minimum(q_level, 7.0)
     q_signed = tl.where(vals < 0.0, -q_level, q_level).to(tl.int8)
 
     tl.store(q_state_ptr + row * dstate + offs, q_signed)
     tl.store(shared_exp_ptr + row * groups_per_row + group, biased_exp.to(tl.uint8))
     tl.store(
         micro_exp_ptr
-        + row * (dstate // MX4_PAIR_SIZE)
-        + group * (MX4_BLOCK_SIZE // MX4_PAIR_SIZE)
-        + tl.arange(0, MX4_BLOCK_SIZE // MX4_PAIR_SIZE),
+        + row * (dstate // 2)
+        + group * 8
+        + tl.arange(0, 8),
         micro_vec.to(tl.uint8),
     )
 
