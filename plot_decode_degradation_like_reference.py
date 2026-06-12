@@ -46,6 +46,12 @@ def main() -> None:
             "marker": "s",
             "rows": by_experiment(rows, "ssm_mx8"),
         },
+        "ssm_mx8_skip_attn_adjacent": {
+            "label": "SSM MX8 Skip Adjacent",
+            "color": "#17becf",
+            "marker": "P",
+            "rows": by_experiment(rows, "ssm_mx8_skip_attn_adjacent"),
+        },
         "both_int4_mx8": {
             "label": "Both INT4+MX8",
             "color": "#1f77ff",
@@ -61,7 +67,11 @@ def main() -> None:
     }
     decode_steps = xs_ys(series["kv_int4"]["rows"])[0]
     tick_labels = ["128", "256", "512", "1K", "2K"]
-    visible_keys = [key for key in ["kv_int4", "ssm_mx8", "both_int4_mx8", "ssm_mx4"] if series[key]["rows"]]
+    visible_keys = [
+        key
+        for key in ["kv_int4", "ssm_mx8", "ssm_mx8_skip_attn_adjacent", "both_int4_mx8", "ssm_mx4"]
+        if series[key]["rows"]
+    ]
 
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(11.4, 4.3), dpi=170)
     fig.suptitle(
