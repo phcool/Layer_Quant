@@ -12,9 +12,12 @@ import matplotlib.pyplot as plt
 OUT = Path("results/nemotron_8b_decode_mx8_like_reference.png")
 KERNEL_CSV = Path("results/nemotron_8b_decode_degradation_ctx1024_kernel.csv")
 MX8_CSV = Path("results/nemotron_8b_decode_mx8_kernel_ctx1024.csv")
+MX4_CSV = Path("results/nemotron_8b_decode_mx4_kernel_ctx1024.csv")
 
 
 def read_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
     with path.open("r", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -32,6 +35,7 @@ def xs_ys(rows: list[dict]) -> tuple[list[int], list[float]]:
 def main() -> None:
     kernel_rows = read_rows(KERNEL_CSV)
     mx8_rows = read_rows(MX8_CSV)
+    mx4_rows = read_rows(MX4_CSV)
 
     series = {
         "kv_int4": {
@@ -52,9 +56,22 @@ def main() -> None:
             "marker": "D",
             "rows": by_experiment(mx8_rows, "both_int4_mx8", "both_int4_mxfp8"),
         },
+        "ssm_mx4": {
+            "label": "SSM State MX4",
+            "color": "#d62728",
+            "marker": "^",
+            "rows": by_experiment(mx4_rows, "ssm_mx4", "ssm_mxfp4"),
+        },
+        "both_int4_mx4": {
+            "label": "Both INT4+MX4",
+            "color": "#9467bd",
+            "marker": "v",
+            "rows": by_experiment(mx4_rows, "both_int4_mx4", "both_int4_mxfp4"),
+        },
     }
     decode_steps = xs_ys(series["kv_int4"]["rows"])[0]
     tick_labels = ["128", "256", "512", "1K", "2K"]
+    visible_keys = [key for key in ["kv_int4", "ssm_mx8", "both_int4_mx8", "ssm_mx4", "both_int4_mx4"] if series[key]["rows"]]
 
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(11.4, 4.3), dpi=170)
     fig.suptitle(
@@ -65,7 +82,7 @@ def main() -> None:
         y=0.98,
     )
 
-    for key in ["kv_int4", "ssm_mx8", "both_int4_mx8"]:
+    for key in visible_keys:
         item = series[key]
         x, y = xs_ys(item["rows"])
         ax0.plot(
@@ -78,7 +95,7 @@ def main() -> None:
             label=item["label"],
         )
 
-    for key in ["kv_int4", "ssm_mx8", "both_int4_mx8"]:
+    for key in visible_keys:
         item = series[key]
         x, y = xs_ys(item["rows"])
         ax1.plot(

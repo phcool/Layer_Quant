@@ -43,15 +43,19 @@ def experiment_plan(name: str, mamba_layers: list[int]) -> tuple[str, set[int], 
         return "int4", set(), {}
     if name == "ssm_mx8":
         return "normal", all_mamba, {idx: "mx8" for idx in all_mamba}
+    if name == "ssm_mx4":
+        return "normal", all_mamba, {idx: "mx4" for idx in all_mamba}
     if name == "both_int4_mx8":
         return "int4", all_mamba, {idx: "mx8" for idx in all_mamba}
+    if name == "both_int4_mx4":
+        return "int4", all_mamba, {idx: "mx4" for idx in all_mamba}
     raise ValueError(f"Unknown experiment {name!r}")
 
 
 def effective_state_group_size(state_quant: str, configured_group_size: int) -> int | None:
     if state_quant == "none":
         return None
-    if state_quant == "mx8":
+    if state_quant in {"mx8", "mx4"}:
         return 16
     return configured_group_size
 
@@ -165,7 +169,9 @@ def plot_degradation(rows: list[dict], checkpoint_steps: list[int], out_path: Pa
     styles = {
         "kv_int4": ("KV Cache INT4", "tab:orange", "o"),
         "ssm_mx8": ("SSM State MX8", "tab:green", "s"),
+        "ssm_mx4": ("SSM State MX4", "tab:red", "^"),
         "both_int4_mx8": ("Both INT4+MX8", "dodgerblue", "D"),
+        "both_int4_mx4": ("Both INT4+MX4", "tab:purple", "v"),
     }
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), dpi=150)
     for ax in axes:
@@ -300,7 +306,7 @@ def main() -> None:
                 "state_quantization": state_quant,
                 "state_group_size": effective_state_group_size(state_quant, args.group_size),
                 "stochastic_rounding": bool(quant_layers) and not args.deterministic,
-                "state_backend": "mx8_kernel" if quant_layers else None,
+                "state_backend": f"{state_quant}_kernel" if quant_layers else None,
                 "quantized_mamba_layers": sorted(quant_layers),
                 "unquantized_mamba_layers": sorted(set(mamba_layers) - quant_layers),
                 "baseline_ppl": baseline_ppl,
@@ -319,7 +325,7 @@ def main() -> None:
             "context_length": args.context_length,
             "kv_quantization": kv_mode,
             "state_quantization": state_quant,
-            "state_backend": "mx8_kernel" if quant_layers else None,
+            "state_backend": f"{state_quant}_kernel" if quant_layers else None,
             "quantized_mamba_layers": sorted(quant_layers),
             **final_row,
         }
