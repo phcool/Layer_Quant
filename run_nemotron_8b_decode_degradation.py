@@ -177,6 +177,8 @@ def plot_degradation(rows: list[dict], checkpoint_steps: list[int], out_path: Pa
     for ax in axes:
         for exp, (label, color, marker) in styles.items():
             exp_rows = [row for row in rows if row["experiment"] == exp]
+            if not exp_rows:
+                continue
             exp_rows.sort(key=lambda row: row["decode_steps"])
             ax.plot(
                 [row["decode_steps"] for row in exp_rows],
