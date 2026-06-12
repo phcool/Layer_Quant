@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 from pathlib import Path
 
@@ -83,7 +84,13 @@ def evaluate(
         seed=seed,
         progress_every=progress_every,
     )
+    module = __import__(model.__class__.__module__, fromlist=["selective_state_update"])
+    if hasattr(module, "_mamba_decode_state_kernel_caches"):
+        module._mamba_decode_state_kernel_caches = {}
+    if hasattr(model, "_mamba_decode_state_kernel_caches"):
+        model._mamba_decode_state_kernel_caches = {}
     del model
+    gc.collect()
     torch.cuda.empty_cache()
     return checkpoint_rows[-1] if checkpoint_rows else final_row
 
