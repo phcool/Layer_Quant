@@ -35,14 +35,18 @@ def parse_steps(value: str) -> list[int]:
     return [int(item.strip()) for item in value.split(",") if item.strip()]
 
 
-def experiment_plan(name: str, mamba_layers: list[int]) -> tuple[str, set[int], dict[int, str]]:
+def experiment_plan(name: str, mamba_layers: list[int], attention_layers: list[int]) -> tuple[str, set[int], dict[int, str]]:
     all_mamba = set(mamba_layers)
+    attention_adjacent_mamba = adjacent_mamba_layers(mamba_layers, attention_layers)
+    non_adjacent_mamba = all_mamba - attention_adjacent_mamba
     if name == "baseline":
         return "normal", set(), {}
     if name == "kv_int4":
         return "int4", set(), {}
     if name == "ssm_mx8":
         return "normal", all_mamba, {idx: "mx8" for idx in all_mamba}
+    if name == "ssm_mx8_skip_attn_adjacent":
+        return "normal", non_adjacent_mamba, {idx: "mx8" for idx in non_adjacent_mamba}
     if name == "ssm_mx4":
         return "normal", all_mamba, {idx: "mx4" for idx in all_mamba}
     if name == "both_int4_mx8":
@@ -169,6 +173,7 @@ def plot_degradation(rows: list[dict], checkpoint_steps: list[int], out_path: Pa
     styles = {
         "kv_int4": ("KV Cache INT4", "tab:orange", "o"),
         "ssm_mx8": ("SSM State MX8", "tab:green", "s"),
+        "ssm_mx8_skip_attn_adjacent": ("SSM MX8 Skip Attn-Adjacent", "tab:cyan", "P"),
         "ssm_mx4": ("SSM State MX4", "tab:red", "^"),
         "both_int4_mx8": ("Both INT4+MX8", "dodgerblue", "D"),
         "both_int4_mx4": ("Both INT4+MX4", "tab:purple", "v"),
@@ -249,7 +254,7 @@ def main() -> None:
 
         mamba_layers, attention_layers, mlp_layers = layer_groups(model.config)
         adjacent = adjacent_mamba_layers(mamba_layers, attention_layers)
-        kv_mode, quant_layers, mode_by_layer = experiment_plan(exp_name, mamba_layers)
+        kv_mode, quant_layers, mode_by_layer = experiment_plan(exp_name, mamba_layers, attention_layers)
         if kv_mode == "int4":
             patch_nemotron_h_attention_int4_kv(model, group_size=args.kv_group_size)
         if quant_layers:
@@ -270,6 +275,7 @@ def main() -> None:
                 "attention_layers": attention_layers,
                 "mlp_layers": mlp_layers,
                 "attention_adjacent_mamba_layers": sorted(adjacent),
+                "non_attention_adjacent_mamba_layers": sorted(set(mamba_layers) - adjacent),
             }
             print(json.dumps(header), flush=True)
             with out_path.open("w", encoding="utf-8") as f:
