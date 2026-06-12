@@ -1,7 +1,0 @@
-==WARNING== Note: Running with uncontrolled GPU caches. Profiling results may be inconsistent.
-==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
-==PROF== Connected to process 3162059 (/scratch2/wl730/conda_envs/hybrid/bin/python3.10)
-==PROF== Disconnected from process 3162059
-==ERROR== The application returned an error code (1).
-==WARNING== No kernels were profiled.
-==WARNING== Profiling kernels launched by child processes requires the --target-processes all option.
