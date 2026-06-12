@@ -637,11 +637,23 @@ def _forward_fused_int4_kv(
         attn_output = self.o_proj(attn_output)
         return attn_output, None, past_key_value
 
-    attn_output = _prefill_attention(
+    key_states_full = self._int4_kv_repeat_kv(key_states, self.num_key_value_groups)
+    value_states_full = self._int4_kv_repeat_kv(value_states, self.num_key_value_groups)
+    causal_mask = attention_mask
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states_full.shape[-2]]
+    if query_states.device.type == "cuda" and attention_mask is not None:
+        query_states = query_states.contiguous()
+        key_states_full = key_states_full.contiguous()
+        value_states_full = value_states_full.contiguous()
+
+    attn_output = torch.nn.functional.scaled_dot_product_attention(
         query_states,
-        layer_cache,
-        self.num_key_value_groups,
-        group_size,
+        key_states_full,
+        value_states_full,
+        attn_mask=causal_mask,
+        dropout_p=self.attention_dropout if self.training else 0.0,
+        is_causal=causal_mask is None and q_len > 1,
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.view(bsz, q_len, self.hidden_size)
