@@ -454,12 +454,12 @@ def patch_nemotron_h_mamba_decode_state_kernel(
     seed: int = 1234,
 ) -> None:
     module = __import__(model.__class__.__module__, fromlist=["selective_state_update"])
-    original = module.selective_state_update
-    if getattr(module, "_mx_state_kernel_patched", False):
-        return
+    original = getattr(module, "_mx_state_kernel_original", module.selective_state_update)
+    module._mx_state_kernel_stochastic = stochastic
+    module._mx_state_kernel_seed = seed
 
     def selective_state_update_mx(ssm_state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
-        caches = getattr(model, "_mamba_decode_state_kernel_caches", {})
+        caches = getattr(module, "_mamba_decode_state_kernel_caches", {})
         kernel_cache = caches.get(id(ssm_state))
         if kernel_cache is None:
             return original(ssm_state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=dt_softplus)
@@ -474,13 +474,14 @@ def patch_nemotron_h_mamba_decode_state_kernel(
             z=z,
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,
-            stochastic=stochastic,
-            seed=seed,
+            stochastic=getattr(module, "_mx_state_kernel_stochastic", True),
+            seed=getattr(module, "_mx_state_kernel_seed", 1234),
         )
 
-    module.selective_state_update = selective_state_update_mx
-    module._mx_state_kernel_original = original
-    module._mx_state_kernel_patched = True
+    if not getattr(module, "_mx_state_kernel_patched", False):
+        module.selective_state_update = selective_state_update_mx
+        module._mx_state_kernel_original = original
+        module._mx_state_kernel_patched = True
     model._mx_state_kernel_group_size = group_size
 
 
@@ -501,6 +502,10 @@ def register_mamba_state_kernel_caches(model, cache_params, mode_by_layer: dict[
             format_bits=format_bits,
         )
     model._mamba_decode_state_kernel_caches = caches
+    module = __import__(model.__class__.__module__, fromlist=["selective_state_update"])
+    global_caches = getattr(module, "_mamba_decode_state_kernel_caches", {})
+    global_caches.update(caches)
+    module._mamba_decode_state_kernel_caches = global_caches
     model._mamba_decode_state_kernel_meta = {
         layer_idx: SimpleNamespace(
             mode=mode_by_layer[layer_idx],
