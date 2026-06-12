@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import sys
 import time
@@ -66,84 +67,96 @@ def run_one(
     torch.manual_seed(seed)
     device = torch.device("cuda")
     torch.cuda.reset_peak_memory_stats(device)
+    model = None
 
-    model = AutoModelForCausalLM.from_pretrained(
-        repo,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-    ).cuda().eval()
-    patch_attention_cache_in_blocks(model)
-    patch_nemotron_h_attention_int4_kv(model, group_size=kv_group_size)
-    patch_nemotron_h_mamba_decode_state_kernel(model, group_size=16, stochastic=True, seed=seed)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            repo,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+        ).cuda().eval()
+        patch_attention_cache_in_blocks(model)
+        patch_nemotron_h_attention_int4_kv(model, group_size=kv_group_size)
+        patch_nemotron_h_mamba_decode_state_kernel(model, group_size=16, stochastic=True, seed=seed)
 
-    config = AutoConfig.from_pretrained(repo, trust_remote_code=True)
-    mamba_layers, attention_layers, mlp_layers = layer_groups(config)
-    mode_by_layer = {idx: "mx8" for idx in mamba_layers}
-    ids = make_batch_ids(repo, dataset, batch_size, sequence_length, warmup_steps + decode_steps).to(device)
-    cache = make_hybrid_cache(model, batch_size=batch_size)
+        config = AutoConfig.from_pretrained(repo, trust_remote_code=True)
+        mamba_layers, attention_layers, mlp_layers = layer_groups(config)
+        mode_by_layer = {idx: "mx8" for idx in mamba_layers}
+        ids = make_batch_ids(repo, dataset, batch_size, sequence_length, warmup_steps + decode_steps).to(device)
+        cache = make_hybrid_cache(model, batch_size=batch_size)
 
-    with torch.inference_mode():
-        torch.cuda.synchronize(device)
-        prefill_start = time.perf_counter()
-        model(
-            input_ids=ids[:, :sequence_length],
-            cache_params=cache,
-            cache_position=torch.arange(sequence_length, device=device, dtype=torch.long),
-            use_cache=True,
-            return_dict=True,
-        )
-        register_mamba_state_kernel_caches(model, cache, mode_by_layer)
-        torch.cuda.synchronize(device)
-        prefill_latency_s = time.perf_counter() - prefill_start
-
-        next_pos = sequence_length
-        for _ in range(warmup_steps):
-            model(
-                input_ids=ids[:, next_pos : next_pos + 1],
-                cache_params=cache,
-                cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
-                use_cache=True,
-                return_dict=True,
-            )
-            next_pos += 1
-        torch.cuda.synchronize(device)
-
-        step_latencies = []
-        decode_start = time.perf_counter()
-        for _ in range(decode_steps):
-            step_start = time.perf_counter()
-            model(
-                input_ids=ids[:, next_pos : next_pos + 1],
-                cache_params=cache,
-                cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
-                use_cache=True,
-                return_dict=True,
-            )
+        with torch.inference_mode():
             torch.cuda.synchronize(device)
-            step_latencies.append(time.perf_counter() - step_start)
-            next_pos += 1
-        decode_total_s = time.perf_counter() - decode_start
+            prefill_start = time.perf_counter()
+            model(
+                input_ids=ids[:, :sequence_length],
+                cache_params=cache,
+                cache_position=torch.arange(sequence_length, device=device, dtype=torch.long),
+                use_cache=True,
+                return_dict=True,
+            )
+            register_mamba_state_kernel_caches(model, cache, mode_by_layer)
+            torch.cuda.synchronize(device)
+            prefill_latency_s = time.perf_counter() - prefill_start
 
-    peak_memory_gib = torch.cuda.max_memory_allocated(device) / (1024**3)
-    tokens = batch_size * decode_steps
-    return {
-        "batch_size": batch_size,
-        "sequence_length": sequence_length,
-        "decode_steps": decode_steps,
-        "warmup_steps": warmup_steps,
-        "status": "ok",
-        "kv_quantization": "int4",
-        "state_quantization": "mx8",
-        "prefill_latency_s": prefill_latency_s,
-        "decode_total_s": decode_total_s,
-        "decode_ms_per_step": decode_total_s * 1000.0 / decode_steps,
-        "decode_ms_per_token": decode_total_s * 1000.0 / tokens,
-        "tokens_per_s": tokens / decode_total_s,
-        "step_p50_ms": percentile(step_latencies, 0.50) * 1000.0,
-        "step_p90_ms": percentile(step_latencies, 0.90) * 1000.0,
-        "peak_memory_gib": peak_memory_gib,
-        "error": "",
-    }
+            next_pos = sequence_length
+            for _ in range(warmup_steps):
+                model(
+                    input_ids=ids[:, next_pos : next_pos + 1],
+                    cache_params=cache,
+                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    use_cache=True,
+                    return_dict=True,
+                )
+                next_pos += 1
+            torch.cuda.synchronize(device)
+
+            step_latencies = []
+            decode_start = time.perf_counter()
+            for _ in range(decode_steps):
+                step_start = time.perf_counter()
+                model(
+                    input_ids=ids[:, next_pos : next_pos + 1],
+                    cache_params=cache,
+                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    use_cache=True,
+                    return_dict=True,
+                )
+                torch.cuda.synchronize(device)
+                step_latencies.append(time.perf_counter() - step_start)
+                next_pos += 1
+            decode_total_s = time.perf_counter() - decode_start
+
+        peak_memory_gib = torch.cuda.max_memory_allocated(device) / (1024**3)
+        tokens = batch_size * decode_steps
+        return {
+            "batch_size": batch_size,
+            "sequence_length": sequence_length,
+            "decode_steps": decode_steps,
+            "warmup_steps": warmup_steps,
+            "status": "ok",
+            "kv_quantization": "int4",
+            "state_quantization": "mx8",
+            "prefill_latency_s": prefill_latency_s,
+            "decode_total_s": decode_total_s,
+            "decode_ms_per_step": decode_total_s * 1000.0 / decode_steps,
+            "decode_ms_per_token": decode_total_s * 1000.0 / tokens,
+            "tokens_per_s": tokens / decode_total_s,
+            "step_p50_ms": percentile(step_latencies, 0.50) * 1000.0,
+            "step_p90_ms": percentile(step_latencies, 0.90) * 1000.0,
+            "peak_memory_gib": peak_memory_gib,
+            "error": "",
+        }
+    finally:
+        if model is not None:
+            module = __import__(model.__class__.__module__, fromlist=["selective_state_update"])
+            if hasattr(module, "_mamba_decode_state_kernel_caches"):
+                module._mamba_decode_state_kernel_caches = {}
+            if hasattr(model, "_mamba_decode_state_kernel_caches"):
+                model._mamba_decode_state_kernel_caches = {}
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
