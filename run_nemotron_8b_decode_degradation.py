@@ -64,6 +64,14 @@ def effective_state_group_size(state_quant: str, configured_group_size: int) -> 
     return configured_group_size
 
 
+def figure_path_for_data(path: Path) -> Path:
+    parts = list(path.parts)
+    if "data" in parts:
+        parts[parts.index("data")] = "figures"
+        return Path(*parts).with_suffix(".png")
+    return path.with_suffix(".png")
+
+
 def run_decode_ppl(
     model,
     ids: torch.Tensor,
@@ -223,7 +231,7 @@ def main() -> None:
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--progress-every", type=int, default=128)
-    parser.add_argument("--output", default="results/nemotron_8b_decode_degradation_ctx1024.jsonl")
+    parser.add_argument("--output", default="results/ppl/data/nemotron_8b_decode_degradation_ctx1024.jsonl")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -234,7 +242,8 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path = out_path.with_suffix(".csv")
-    png_path = out_path.with_suffix(".png")
+    png_path = figure_path_for_data(out_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
 
     all_rows: list[dict] = []
     baseline_by_step: dict[int, float] = {}

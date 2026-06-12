@@ -9,8 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-OUT = Path("results/ppl/nemotron_8b_decode_corrected_no_both_mx4_ctx1024.png")
-ALL_QUANT_CSV = Path("results/ppl/nemotron_8b_decode_corrected_no_both_mx4_ctx1024.csv")
+OUT = Path("results/ppl/figures/nemotron_8b_decode_corrected_no_both_mx4_ctx1024.png")
+ALL_QUANT_CSV = Path("results/ppl/data/nemotron_8b_decode_corrected_no_both_mx4_ctx1024.csv")
 
 
 def read_rows(path: Path) -> list[dict]:

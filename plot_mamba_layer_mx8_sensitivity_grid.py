@@ -9,7 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-RESULT_DIR = Path("results/ppl")
+DATA_DIR = Path("results/ppl/data")
+FIGURE_DIR = Path("results/ppl/figures")
 ATTENTION_LAYERS = [7, 18, 29, 40]
 CASES = [
     (1024, 256),
@@ -20,13 +21,13 @@ CASES = [
 
 
 def case_path(context_length: int, decode_steps: int) -> Path:
-    return RESULT_DIR / (
+    return DATA_DIR / (
         f"nemotron_8b_mamba_layer_mx8_sensitivity_ctx{context_length}_decode{decode_steps}.csv"
     )
 
 
 def part_paths(context_length: int, decode_steps: int) -> list[Path]:
-    stem = RESULT_DIR / (
+    stem = DATA_DIR / (
         f"nemotron_8b_mamba_layer_mx8_sensitivity_ctx{context_length}_decode{decode_steps}"
     )
     return [stem.with_name(stem.name + "_part1.csv"), stem.with_name(stem.name + "_part2.csv")]
@@ -115,7 +116,7 @@ def main() -> None:
         fig.legend(handles, labels, loc="lower center", ncol=1, frameon=False, fontsize=9)
     fig.tight_layout(rect=(0, 0.04, 1, 0.94))
 
-    out_path = RESULT_DIR / "nemotron_8b_mamba_layer_mx8_sensitivity_grid.png"
+    out_path = FIGURE_DIR / "nemotron_8b_mamba_layer_mx8_sensitivity_grid.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     print(out_path)

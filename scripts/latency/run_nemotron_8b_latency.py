@@ -205,7 +205,7 @@ def main() -> None:
         help="Comma-separated modes: none, kv_int4, state_mx8, kv_int4_state_mx8.",
     )
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--output", default="results/latency/nemotron_8b_seq2048_latency.csv")
+    parser.add_argument("--output", default="results/latency/data/nemotron_8b_seq2048_latency.csv")
     args = parser.parse_args()
 
     quantization_modes = {

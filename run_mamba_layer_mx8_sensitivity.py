@@ -112,6 +112,14 @@ def write_rows(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def figure_path_for_data(path: Path) -> Path:
+    parts = list(path.parts)
+    if "data" in parts:
+        parts[parts.index("data")] = "figures"
+        return Path(*parts).with_suffix(".png")
+    return path.with_suffix(".png")
+
+
 def read_rows(paths: list[Path]) -> list[dict]:
     rows: list[dict] = []
     seen: set[int] = set()
@@ -176,7 +184,10 @@ def main() -> None:
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--progress-every", type=int, default=0)
-    parser.add_argument("--output", default="results/nemotron_8b_mamba_layer_mx8_sensitivity_ctx1024_decode256.csv")
+    parser.add_argument(
+        "--output",
+        default="results/ppl/data/nemotron_8b_mamba_layer_mx8_sensitivity_ctx1024_decode256.csv",
+    )
     parser.add_argument("--plot-inputs", default="")
     parser.add_argument("--plot-output", default="")
     args = parser.parse_args()
@@ -187,7 +198,7 @@ def main() -> None:
     if args.plot_inputs:
         input_paths = [Path(item.strip()) for item in args.plot_inputs.split(",") if item.strip()]
         rows = read_rows(input_paths)
-        out_path = Path(args.plot_output) if args.plot_output else Path(args.output).with_suffix(".png")
+        out_path = Path(args.plot_output) if args.plot_output else figure_path_for_data(Path(args.output))
         write_rows(Path(args.output), rows)
         plot_rows(rows, attention_layers, out_path)
         print(json.dumps({"event": "plot", "csv": args.output, "plot": str(out_path)}), flush=True)
@@ -254,8 +265,9 @@ def main() -> None:
         print(json.dumps({"event": "layer_result", **row}), flush=True)
 
     out_path = Path(args.output)
-    plot_rows(rows, attention_layers, out_path.with_suffix(".png"))
-    print(json.dumps({"event": "outputs", "csv": str(out_path), "plot": str(out_path.with_suffix(".png"))}), flush=True)
+    plot_path = figure_path_for_data(out_path)
+    plot_rows(rows, attention_layers, plot_path)
+    print(json.dumps({"event": "outputs", "csv": str(out_path), "plot": str(plot_path)}), flush=True)
 
 
 if __name__ == "__main__":
