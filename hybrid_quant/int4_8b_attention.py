@@ -236,7 +236,8 @@ def _int4_prefill_attention_kernel(
                 other=0.0,
             ).to(tl.float32)
             v = signed * scale[:, None]
-            acc += tl.sum(p[:, None] * v, axis=0)
+            contrib = tl.sum(p[:, None] * v, axis=0)
+            acc += tl.sum(tl.where(d_offsets[:, None] == gd[None, :], contrib[None, :], 0.0), axis=1)
 
         m_i = m_new
         l_i = l_new
@@ -370,7 +371,8 @@ def _int4_decode_attention_kernel(
                 other=0.0,
             ).to(tl.float32)
             v = signed * scale[:, None]
-            acc += tl.sum(p[:, None] * v, axis=0)
+            contrib = tl.sum(p[:, None] * v, axis=0)
+            acc += tl.sum(tl.where(d_offsets[:, None] == gd[None, :], contrib[None, :], 0.0), axis=1)
 
         m_i = m_new
         l_i = l_new
