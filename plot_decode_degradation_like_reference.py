@@ -9,10 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-OUT = Path("results/nemotron_8b_decode_mx8_like_reference.png")
-KERNEL_CSV = Path("results/nemotron_8b_decode_degradation_ctx1024_kernel.csv")
-MX8_CSV = Path("results/nemotron_8b_decode_mx8_kernel_ctx1024.csv")
-MX4_CSV = Path("results/nemotron_8b_decode_mx4_kernel_ctx1024.csv")
+OUT = Path("results/nemotron_8b_decode_all_quant_ctx1024_without_both_mx4.png")
+ALL_QUANT_CSV = Path("results/nemotron_8b_decode_all_quant_ctx1024.csv")
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -33,45 +31,37 @@ def xs_ys(rows: list[dict]) -> tuple[list[int], list[float]]:
 
 
 def main() -> None:
-    kernel_rows = read_rows(KERNEL_CSV)
-    mx8_rows = read_rows(MX8_CSV)
-    mx4_rows = read_rows(MX4_CSV)
+    rows = read_rows(ALL_QUANT_CSV)
 
     series = {
         "kv_int4": {
             "label": "KV Cache INT4",
             "color": "#ff7f0e",
             "marker": "o",
-            "rows": by_experiment(kernel_rows, "kv_int4"),
+            "rows": by_experiment(rows, "kv_int4"),
         },
         "ssm_mx8": {
             "label": "SSM State MX8",
             "color": "#2ca02c",
             "marker": "s",
-            "rows": by_experiment(mx8_rows, "ssm_mx8", "ssm_mxfp8"),
+            "rows": by_experiment(rows, "ssm_mx8"),
         },
         "both_int4_mx8": {
             "label": "Both INT4+MX8",
             "color": "#1f77ff",
             "marker": "D",
-            "rows": by_experiment(mx8_rows, "both_int4_mx8", "both_int4_mxfp8"),
+            "rows": by_experiment(rows, "both_int4_mx8"),
         },
         "ssm_mx4": {
             "label": "SSM State MX4",
             "color": "#d62728",
             "marker": "^",
-            "rows": by_experiment(mx4_rows, "ssm_mx4", "ssm_mxfp4"),
-        },
-        "both_int4_mx4": {
-            "label": "Both INT4+MX4",
-            "color": "#9467bd",
-            "marker": "v",
-            "rows": by_experiment(mx4_rows, "both_int4_mx4", "both_int4_mxfp4"),
+            "rows": by_experiment(rows, "ssm_mx4"),
         },
     }
     decode_steps = xs_ys(series["kv_int4"]["rows"])[0]
     tick_labels = ["128", "256", "512", "1K", "2K"]
-    visible_keys = [key for key in ["kv_int4", "ssm_mx8", "both_int4_mx8", "ssm_mx4", "both_int4_mx4"] if series[key]["rows"]]
+    visible_keys = [key for key in ["kv_int4", "ssm_mx8", "both_int4_mx8", "ssm_mx4"] if series[key]["rows"]]
 
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(11.4, 4.3), dpi=170)
     fig.suptitle(
@@ -119,12 +109,12 @@ def main() -> None:
         ax.tick_params(labelsize=8)
 
     ax0.set_title("(a) Cumulative Quantization Error", fontsize=9)
-    ax0.set_ylim(-20, 1300)
+    ax0.set_ylim(-20, 430)
     ax0.text(135, 45, "5% threshold", color="0.55", fontsize=7)
     ax0.legend(loc="upper left", fontsize=7, framealpha=0.85)
 
     ax1.set_title("(b) Detail: Near-Lossless / MX8 Configs", fontsize=9)
-    ax1.set_ylim(-1, 55)
+    ax1.set_ylim(-1, 12)
     ax1.annotate(
         "KV error diluted",
         xy=(2048, 1.45),
