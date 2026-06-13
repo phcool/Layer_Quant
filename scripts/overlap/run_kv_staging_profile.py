@@ -72,18 +72,35 @@ def mean_non_null(rows: list[dict], key: str) -> float | None:
     return mean([float(row[key]) for row in rows if row.get(key) not in ("", None)])
 
 
-def build_gap_slowdown_by_step(rows: list[dict]) -> dict[tuple[int, int], float | None]:
+def clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def build_gap_slowdown_by_step(rows: list[dict]) -> dict[tuple[int, int], dict[str, float | None]]:
     baseline = {
         (int(row["decode_step"]), int(row["attn_layer_id"])): float(row["T_gap_ms"])
         for row in rows
         if row["staging_mode"] == "none"
     }
-    out: dict[tuple[int, int], float | None] = {}
+    out: dict[tuple[int, int], dict[str, float | None]] = {}
     for row in rows:
         if row["staging_mode"] != "dequant":
             continue
         key = (int(row["decode_step"]), int(row["attn_layer_id"]))
-        out[key] = pct_change(float(row["T_gap_ms"]), baseline.get(key))
+        gap = float(row["T_gap_ms"])
+        base = baseline.get(key)
+        stage = row.get("T_stage_ms")
+        stage_ms = None if stage in ("", None) else float(stage)
+        slowdown_ms = None if base is None else gap - base
+        effective_overlap = None
+        if slowdown_ms is not None and stage_ms not in (None, 0):
+            effective_overlap = clamp01(1.0 - slowdown_ms / stage_ms)
+        out[key] = {
+            "gap_slowdown_ms": slowdown_ms,
+            "gap_slowdown_pct": pct_change(gap, base),
+            "net_stage_cost_ms": None if slowdown_ms is None else max(0.0, slowdown_ms),
+            "effective_overlap": effective_overlap,
+        }
     return out
 
 
@@ -91,35 +108,50 @@ def build_summary(rows: list[dict]) -> list[dict]:
     grouped: dict[tuple[str, int], list[dict]] = {}
     for row in rows:
         grouped.setdefault((row["staging_mode"], int(row["attn_layer_id"])), []).append(row)
-
-    baseline_gap = {
-        attn_layer_id: mean_non_null(group_rows, "T_gap_ms")
-        for (mode, attn_layer_id), group_rows in grouped.items()
-        if mode == "none"
-    }
+    attn_ids = sorted({int(row["attn_layer_id"]) for row in rows})
     out = []
-    for (mode, attn_layer_id), group_rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
-        mean_gap = mean_non_null(group_rows, "T_gap_ms")
+    for attn_layer_id in attn_ids:
+        none_rows = grouped.get(("none", attn_layer_id), [])
+        dequant_rows = grouped.get(("dequant", attn_layer_id), [])
+        sample_rows = dequant_rows or none_rows
+        mean_gap_none = mean_non_null(none_rows, "T_gap_ms")
+        mean_gap_dequant = mean_non_null(dequant_rows, "T_gap_ms")
+        mean_stage = mean_non_null(dequant_rows, "T_stage_ms")
+        mean_slowdown_ms = None if mean_gap_dequant is None or mean_gap_none is None else mean_gap_dequant - mean_gap_none
+        effective_overlap = None
+        if mean_slowdown_ms is not None and mean_stage not in (None, 0):
+            effective_overlap = clamp01(1.0 - mean_slowdown_ms / mean_stage)
         out.append(
             {
-                "staging_mode": mode,
-                "batch_size": group_rows[0]["batch_size"],
-                "context_length": group_rows[0]["context_length"],
+                "batch_size": sample_rows[0]["batch_size"],
+                "context_length": sample_rows[0]["context_length"],
                 "attn_layer_id": attn_layer_id,
-                "prev_attn_layer_id": group_rows[0]["prev_attn_layer_id"],
-                "steps": len(group_rows),
-                "mean_T_gap_ms": mean_gap,
-                "mean_T_stage_ms": mean_non_null(group_rows, "T_stage_ms"),
-                "mean_T_attn_ms": mean_non_null(group_rows, "T_attn_ms"),
-                "mean_wait_before_attention_ms": mean_non_null(group_rows, "wait_before_attention_ms"),
-                "mean_hideability": mean_non_null(group_rows, "hideability"),
-                "mean_overlap_ratio": mean_non_null(group_rows, "overlap_ratio"),
-                "gap_slowdown_pct": pct_change(mean_gap, baseline_gap.get(attn_layer_id))
-                if mode == "dequant"
-                else None,
+                "prev_attn_layer_id": sample_rows[0]["prev_attn_layer_id"],
+                "steps_none": len(none_rows),
+                "steps_dequant": len(dequant_rows),
+                "mean_T_gap_none_ms": mean_gap_none,
+                "mean_T_gap_dequant_ms": mean_gap_dequant,
+                "mean_T_stage_ms": mean_stage,
+                "mean_T_attn_none_ms": mean_non_null(none_rows, "T_attn_ms"),
+                "mean_T_attn_dequant_ms": mean_non_null(dequant_rows, "T_attn_ms"),
+                "mean_wait_before_attention_ms": mean_non_null(dequant_rows, "wait_before_attention_ms"),
+                "mean_hideability": mean_non_null(dequant_rows, "hideability"),
+                "mean_overlap_ratio_wait_based": mean_non_null(dequant_rows, "overlap_ratio_wait_based"),
+                "mean_effective_overlap_wall_clock": effective_overlap,
+                "mean_gap_slowdown_ms": mean_slowdown_ms,
+                "mean_gap_slowdown_pct": pct_change(mean_gap_dequant, mean_gap_none),
+                "mean_net_stage_cost_ms": None if mean_slowdown_ms is None else max(0.0, mean_slowdown_ms),
             }
         )
     return out
+
+
+def cuda_profiler_start() -> None:
+    torch.cuda.cudart().cudaProfilerStart()
+
+
+def cuda_profiler_stop() -> None:
+    torch.cuda.cudart().cudaProfilerStop()
 
 
 def run_mode(
@@ -134,7 +166,9 @@ def run_mode(
     kv_group_size: int,
     seed: int,
     enable_nvtx: bool,
-) -> tuple[list[dict], list[dict], dict]:
+    debug_stage_repeats: int,
+    cuda_profiler_capture: bool,
+) -> tuple[list[dict], list[dict], list[dict], dict]:
     torch.manual_seed(seed)
     device = torch.device("cuda")
     model = None
@@ -164,13 +198,14 @@ def run_mode(
         patch_profiled_blocks(model, profiler)
 
         ids = make_batch_ids(repo, dataset, batch_size, context_length, warmup_steps + decode_steps).to(device)
+        positions = torch.arange(context_length + warmup_steps + decode_steps + 1, device=device, dtype=torch.long)
         cache = make_hybrid_cache(model, batch_size=batch_size)
 
         with torch.inference_mode():
             model(
                 input_ids=ids[:, :context_length],
                 cache_params=cache,
-                cache_position=torch.arange(context_length, device=device, dtype=torch.long),
+                cache_position=positions[:context_length],
                 use_cache=True,
                 return_dict=True,
             )
@@ -179,32 +214,38 @@ def run_mode(
                 model(
                     input_ids=ids[:, next_pos : next_pos + 1],
                     cache_params=cache,
-                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    cache_position=positions[next_pos : next_pos + 1],
                     use_cache=True,
                     return_dict=True,
                 )
                 next_pos += 1
             if staging_mode == "dequant":
                 profiler.cache_params = cache
+                profiler.device = device
                 if profiler.staging_stream is None:
                     profiler.staging_stream = torch.cuda.Stream(device=device)
+                profiler.allocate_stage_buffers(cache, context_length + warmup_steps + decode_steps + 1)
                 for attn_layer_id in attention_layers:
-                    profiler.schedule_stage(attn_layer_id, None)
+                    profiler.debug_stage_repeated(attn_layer_id, debug_stage_repeats)
                 profiler.scheduled_stages = {}
                 profiler.cache_params = None
             torch.cuda.synchronize(device)
 
+            if cuda_profiler_capture:
+                cuda_profiler_start()
             for step_idx in range(decode_steps):
                 profiler.start_step(step_idx, next_pos, cache, device)
                 model(
                     input_ids=ids[:, next_pos : next_pos + 1],
                     cache_params=cache,
-                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    cache_position=positions[next_pos : next_pos + 1],
                     use_cache=True,
                     return_dict=True,
                 )
                 profiler.end_step()
                 next_pos += 1
+            if cuda_profiler_capture:
+                cuda_profiler_stop()
             torch.cuda.synchronize(device)
 
         metadata = {
@@ -222,7 +263,7 @@ def run_mode(
                 attn: attention_layers[idx - 1] if idx > 0 else None for idx, attn in enumerate(attention_layers)
             },
         }
-        return profiler.attention_rows(), profiler.layer_rows(), metadata
+        return profiler.attention_rows(), profiler.layer_rows(), profiler.debug_stage_rows(), metadata
     finally:
         del model
         gc.collect()
@@ -241,6 +282,8 @@ def main() -> None:
     parser.add_argument("--staging-modes", default="none,dequant")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--enable-nvtx", action="store_true")
+    parser.add_argument("--cuda-profiler-capture", action="store_true")
+    parser.add_argument("--debug-stage-repeats", type=int, default=10)
     parser.add_argument("--output-prefix", default="results/overlap/data/nemotron_8b_kv_staging_profile")
     args = parser.parse_args()
 
@@ -251,10 +294,11 @@ def main() -> None:
 
     all_attention_rows: list[dict] = []
     all_layer_rows: list[dict] = []
+    all_debug_stage_rows: list[dict] = []
     metadata: dict | None = None
     for mode in modes:
         print(json.dumps({"event": "start_mode", "staging_mode": mode}), flush=True)
-        attention_rows, layer_rows, mode_metadata = run_mode(
+        attention_rows, layer_rows, debug_stage_rows, mode_metadata = run_mode(
             repo=args.repo,
             dataset=args.dataset,
             staging_mode=mode,
@@ -265,9 +309,12 @@ def main() -> None:
             kv_group_size=args.kv_group_size,
             seed=args.seed,
             enable_nvtx=args.enable_nvtx,
+            debug_stage_repeats=args.debug_stage_repeats,
+            cuda_profiler_capture=args.cuda_profiler_capture,
         )
         all_attention_rows.extend(attention_rows)
         all_layer_rows.extend(layer_rows)
+        all_debug_stage_rows.extend(debug_stage_rows)
         metadata = metadata or mode_metadata
         print(
             json.dumps(
@@ -284,9 +331,16 @@ def main() -> None:
     gap_slowdown_by_step = build_gap_slowdown_by_step(all_attention_rows)
     for row in all_attention_rows:
         if row["staging_mode"] == "dequant":
-            row["gap_slowdown_pct"] = gap_slowdown_by_step.get((int(row["decode_step"]), int(row["attn_layer_id"])))
+            slowdown = gap_slowdown_by_step.get((int(row["decode_step"]), int(row["attn_layer_id"])))
+            row["gap_slowdown_ms"] = None if slowdown is None else slowdown["gap_slowdown_ms"]
+            row["gap_slowdown_pct"] = None if slowdown is None else slowdown["gap_slowdown_pct"]
+            row["net_stage_cost_ms"] = None if slowdown is None else slowdown["net_stage_cost_ms"]
+            row["effective_overlap_wall_clock"] = None if slowdown is None else slowdown["effective_overlap"]
         else:
+            row["gap_slowdown_ms"] = None
             row["gap_slowdown_pct"] = None
+            row["net_stage_cost_ms"] = None
+            row["effective_overlap_wall_clock"] = None
 
     summary_rows = build_summary(all_attention_rows)
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +348,7 @@ def main() -> None:
     write_jsonl(output_prefix.with_name(output_prefix.name + "_attention_raw.jsonl"), all_attention_rows)
     write_csv(output_prefix.with_name(output_prefix.name + "_attention_raw.csv"), all_attention_rows)
     write_csv(output_prefix.with_name(output_prefix.name + "_layer_raw.csv"), all_layer_rows)
+    write_csv(output_prefix.with_name(output_prefix.name + "_stage_debug.csv"), all_debug_stage_rows)
     write_csv(output_prefix.with_name(output_prefix.name + "_summary.csv"), summary_rows)
     print(
         json.dumps(
@@ -303,6 +358,7 @@ def main() -> None:
                 "attention_raw_jsonl": str(output_prefix.with_name(output_prefix.name + "_attention_raw.jsonl")),
                 "attention_raw_csv": str(output_prefix.with_name(output_prefix.name + "_attention_raw.csv")),
                 "layer_raw_csv": str(output_prefix.with_name(output_prefix.name + "_layer_raw.csv")),
+                "stage_debug_csv": str(output_prefix.with_name(output_prefix.name + "_stage_debug.csv")),
                 "summary_csv": str(output_prefix.with_name(output_prefix.name + "_summary.csv")),
             }
         ),
