@@ -167,6 +167,7 @@ class KVStagingProfiler:
     cache_params: object | None = None
     device: torch.device | None = None
     staging_stream: torch.cuda.Stream | None = None
+    active: bool = False
     step_start_event: torch.cuda.Event | None = None
     last_attention_end_event: torch.cuda.Event | None = None
     last_attention_layer_id: int | None = None
@@ -199,6 +200,7 @@ class KVStagingProfiler:
             torch.cuda.nvtx.range_pop()
 
     def start_step(self, step_idx: int, decode_position: int, cache_params, device: torch.device) -> None:
+        self.active = True
         self.current_step_idx = step_idx
         self.current_decode_position = decode_position
         self.cache_params = cache_params
@@ -223,6 +225,7 @@ class KVStagingProfiler:
             except RuntimeError:
                 pass
         self.cache_params = None
+        self.active = False
 
     def cache_for_layer(self, attn_layer_id: int):
         caches = getattr(self.cache_params, "_int4_kv_layer_caches", None)
@@ -410,6 +413,33 @@ def patch_profiled_blocks(model, profiler: KVStagingProfiler) -> None:
             _layer_id=layer_id,
             _block_type=block_type,
         ):
+            if not profiler.active:
+                residual = hidden_states
+                hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
+                if self.residual_in_fp32:
+                    residual = residual.to(torch.float32)
+
+                if _block_type == "mamba":
+                    hidden_states = self.mixer(
+                        hidden_states,
+                        cache_params=cache_params,
+                        cache_position=cache_position,
+                        attention_mask=attention_mask,
+                    )
+                elif _block_type == "attention":
+                    hidden_states = self.mixer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        past_key_value=cache_params,
+                        use_cache=cache_params is not None,
+                        cache_position=cache_position,
+                    )[0]
+                elif _block_type == "mlp":
+                    hidden_states = self.mixer(hidden_states)
+                else:
+                    raise ValueError(f"Invalid block_type: {_block_type}")
+                return residual + hidden_states
+
             if _block_type == "attention":
                 layer_start, _, _ = profiler.before_attention_layer(_layer_id)
             else:
