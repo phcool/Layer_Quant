@@ -65,6 +65,9 @@ def read_ncu_csv(path: Path) -> list[dict]:
     header_idx = None
     for idx, line in enumerate(lines):
         lowered = line.lower()
+        if "kernel name" in lowered and "gpu__time_duration.sum" in lowered:
+            header_idx = idx
+            break
         if "kernel" in lowered and "metric" in lowered:
             header_idx = idx
             break
@@ -75,6 +78,25 @@ def read_ncu_csv(path: Path) -> list[dict]:
     if reader.fieldnames is None:
         return []
     kernel_col = candidate_columns(reader.fieldnames, [r"kernel.*name", r"^name$"])
+    wide_time_col = candidate_columns(reader.fieldnames, [r"^gpu__time_duration\.sum$"])
+    if kernel_col and wide_time_col:
+        rows = []
+        for row in reader:
+            kernel = row.get(kernel_col, "").strip().strip('"')
+            if not kernel:
+                continue
+            value = parse_float(row.get(wide_time_col, ""))
+            if value is None:
+                continue
+            rows.append(
+                {
+                    "kernel_name": kernel,
+                    "category": classify_kernel(kernel),
+                    "duration_ms": value / 1.0e6,
+                }
+            )
+        return rows
+
     metric_col = candidate_columns(reader.fieldnames, [r"metric.*name", r"^metric$"])
     value_col = candidate_columns(reader.fieldnames, [r"metric.*value", r"^value$"])
     unit_col = candidate_columns(reader.fieldnames, [r"metric.*unit", r"^unit$"])
