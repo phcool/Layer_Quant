@@ -184,6 +184,14 @@ def run_mode(
                     return_dict=True,
                 )
                 next_pos += 1
+            if staging_mode == "dequant":
+                profiler.cache_params = cache
+                if profiler.staging_stream is None:
+                    profiler.staging_stream = torch.cuda.Stream(device=device)
+                for attn_layer_id in attention_layers:
+                    profiler.schedule_stage(attn_layer_id, None)
+                profiler.scheduled_stages = {}
+                profiler.cache_params = None
             torch.cuda.synchronize(device)
 
             for step_idx in range(decode_steps):
