@@ -301,10 +301,7 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
         nvcc_flags.extend(["-Xcompiler", "/Zc:__cplusplus"])
         compiler_c17_flag=["-O2", "/std:c++17", "/Zc:__cplusplus"]
 
-    ext_modules.append(
-        CUDAExtension(
-            name="flash_attn_2_cuda",
-            sources=[
+    flash_attn_sources = [
                 "csrc/flash_attn/flash_api.cpp",
                 "csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim32_bf16_sm80.cu",
@@ -378,7 +375,18 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
                 "csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_causal_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_causal_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_causal_sm80.cu",
-            ],
+            ]
+    if os.getenv("FLASH_ATTN_FORWARD_ONLY", "0") == "1":
+        flash_attn_sources = [
+            source
+            for source in flash_attn_sources
+            if source.endswith("flash_api.cpp") or "/flash_fwd" in source
+        ]
+
+    ext_modules.append(
+        CUDAExtension(
+            name="flash_attn_2_cuda",
+            sources=flash_attn_sources,
             extra_compile_args={
                 "cxx": compiler_c17_flag,
                 "nvcc": append_nvcc_threads(nvcc_flags + cc_flag),
