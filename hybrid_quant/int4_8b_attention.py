@@ -16,10 +16,6 @@ class Int4KVLayerCache:
     k_scale: torch.Tensor
     v_scale: torch.Tensor
     length: int = 0
-    split_accum: torch.Tensor | None = None
-    split_m: torch.Tensor | None = None
-    split_l: torch.Tensor | None = None
-    split_shape: tuple[int, int, int, int] | None = None
 
 
 def int4_quant_dequant(x: torch.Tensor, group_size: int = 64) -> torch.Tensor:
@@ -406,230 +402,6 @@ def _int4_decode_attention_kernel(
     )
 
 
-@triton.heuristics({"HAS_ATTN_MASK": lambda args: args["mask_ptr"] is not None})
-@triton.jit
-def _int4_decode_attention_split_kernel(
-    q_ptr,
-    k_packed_ptr,
-    v_packed_ptr,
-    k_scale_ptr,
-    v_scale_ptr,
-    mask_ptr,
-    split_accum_ptr,
-    split_m_ptr,
-    split_l_ptr,
-    q_stride_b,
-    q_stride_h,
-    q_stride_t,
-    q_stride_d,
-    k_stride_b,
-    k_stride_h,
-    k_stride_t,
-    k_stride_p,
-    v_stride_b,
-    v_stride_h,
-    v_stride_t,
-    v_stride_p,
-    ks_stride_b,
-    ks_stride_h,
-    ks_stride_t,
-    ks_stride_g,
-    vs_stride_b,
-    vs_stride_h,
-    vs_stride_t,
-    vs_stride_g,
-    mask_stride_b,
-    mask_stride_h,
-    mask_stride_q,
-    mask_stride_k,
-    accum_stride_s,
-    accum_stride_b,
-    accum_stride_h,
-    accum_stride_d,
-    ml_stride_s,
-    ml_stride_b,
-    ml_stride_h,
-    seq_len,
-    mask_k_len,
-    n_query_heads: tl.constexpr,
-    num_key_value_groups: tl.constexpr,
-    head_dim: tl.constexpr,
-    group_size: tl.constexpr,
-    num_splits: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    HAS_ATTN_MASK: tl.constexpr,
-):
-    bh = tl.program_id(0)
-    split = tl.program_id(1)
-    batch = bh // n_query_heads
-    q_head = bh - batch * n_query_heads
-    kv_head = q_head // num_key_value_groups
-    d_offsets = tl.arange(0, BLOCK_D)
-    d_mask = d_offsets < head_dim
-    m_i = tl.full((), -float("inf"), tl.float32)
-    l_i = tl.full((), 0.0, tl.float32)
-    acc = tl.zeros((BLOCK_D,), tl.float32)
-    scale_sm = 1.4426950408889634 / tl.sqrt(tl.full((), head_dim, tl.float32))
-
-    split_start = (seq_len * split) // num_splits
-    split_end = (seq_len * (split + 1)) // num_splits
-    n_offsets = tl.arange(0, BLOCK_N)
-    start = split_start
-    while start < split_end:
-        n = start + n_offsets
-        n_mask = n < split_end
-        scores = tl.zeros((BLOCK_N,), tl.float32)
-        for d_start in tl.static_range(0, BLOCK_D, group_size):
-            gd = d_start + tl.arange(0, group_size)
-            gd_mask = gd < head_dim
-            q_group = tl.load(
-                q_ptr + batch * q_stride_b + q_head * q_stride_h + gd * q_stride_d,
-                mask=gd_mask,
-                other=0.0,
-            ).to(tl.float32)
-            pair = gd // 2
-            byte = tl.load(
-                k_packed_ptr
-                + batch * k_stride_b
-                + kv_head * k_stride_h
-                + n[:, None] * k_stride_t
-                + pair[None, :] * k_stride_p,
-                mask=n_mask[:, None] & gd_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            nibble = tl.where((gd[None, :] & 1) == 0, byte & 15, (byte >> 4) & 15)
-            signed = tl.where(nibble >= 8, nibble - 16, nibble).to(tl.float32)
-            scale = tl.load(
-                k_scale_ptr
-                + batch * ks_stride_b
-                + kv_head * ks_stride_h
-                + n * ks_stride_t
-                + (d_start // group_size) * ks_stride_g,
-                mask=n_mask,
-                other=0.0,
-            ).to(tl.float32)
-            k = signed * scale[:, None]
-            scores += tl.sum(k * q_group[None, :], axis=1)
-
-        scores = tl.where(n_mask, scores * scale_sm, -float("inf"))
-        if HAS_ATTN_MASK:
-            mask_valid = n < mask_k_len
-            mask_bias = tl.load(
-                mask_ptr + batch * mask_stride_b + n * mask_stride_k,
-                mask=n_mask & mask_valid,
-                other=-float("inf"),
-            ).to(tl.float32)
-            scores += mask_bias
-        m_new = tl.maximum(m_i, tl.max(scores, axis=0))
-        alpha = tl.exp2(m_i - m_new)
-        p = tl.exp2(scores - m_new)
-        l_new = l_i * alpha + tl.sum(p, axis=0)
-        acc *= alpha
-
-        for d_start in tl.static_range(0, BLOCK_D, group_size):
-            gd = d_start + tl.arange(0, group_size)
-            gd_mask = gd < head_dim
-            pair = gd // 2
-            byte = tl.load(
-                v_packed_ptr
-                + batch * v_stride_b
-                + kv_head * v_stride_h
-                + n[:, None] * v_stride_t
-                + pair[None, :] * v_stride_p,
-                mask=n_mask[:, None] & gd_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            nibble = tl.where((gd[None, :] & 1) == 0, byte & 15, (byte >> 4) & 15)
-            signed = tl.where(nibble >= 8, nibble - 16, nibble).to(tl.float32)
-            scale = tl.load(
-                v_scale_ptr
-                + batch * vs_stride_b
-                + kv_head * vs_stride_h
-                + n * vs_stride_t
-                + (d_start // group_size) * vs_stride_g,
-                mask=n_mask,
-                other=0.0,
-            ).to(tl.float32)
-            v = signed * scale[:, None]
-            contrib = tl.sum(p[:, None] * v, axis=0)
-            acc += tl.sum(tl.where(d_offsets[:, None] == gd[None, :], contrib[None, :], 0.0), axis=1)
-
-        m_i = m_new
-        l_i = l_new
-        start += BLOCK_N
-
-    tl.store(
-        split_accum_ptr
-        + split * accum_stride_s
-        + batch * accum_stride_b
-        + q_head * accum_stride_h
-        + d_offsets * accum_stride_d,
-        acc,
-        mask=d_mask,
-    )
-    tl.store(split_m_ptr + split * ml_stride_s + batch * ml_stride_b + q_head * ml_stride_h, m_i)
-    tl.store(split_l_ptr + split * ml_stride_s + batch * ml_stride_b + q_head * ml_stride_h, l_i)
-
-
-@triton.jit
-def _int4_decode_attention_split_combine_kernel(
-    split_accum_ptr,
-    split_m_ptr,
-    split_l_ptr,
-    out_ptr,
-    accum_stride_s,
-    accum_stride_b,
-    accum_stride_h,
-    accum_stride_d,
-    ml_stride_s,
-    ml_stride_b,
-    ml_stride_h,
-    out_stride_b,
-    out_stride_h,
-    out_stride_d,
-    n_query_heads: tl.constexpr,
-    head_dim: tl.constexpr,
-    num_splits: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    bh = tl.program_id(0)
-    batch = bh // n_query_heads
-    q_head = bh - batch * n_query_heads
-    d_offsets = tl.arange(0, BLOCK_D)
-    d_mask = d_offsets < head_dim
-
-    m = tl.full((), -float("inf"), tl.float32)
-    for split in tl.static_range(0, num_splits):
-        m_s = tl.load(split_m_ptr + split * ml_stride_s + batch * ml_stride_b + q_head * ml_stride_h)
-        m = tl.maximum(m, m_s)
-
-    l = tl.full((), 0.0, tl.float32)
-    acc = tl.zeros((BLOCK_D,), tl.float32)
-    for split in tl.static_range(0, num_splits):
-        m_s = tl.load(split_m_ptr + split * ml_stride_s + batch * ml_stride_b + q_head * ml_stride_h)
-        l_s = tl.load(split_l_ptr + split * ml_stride_s + batch * ml_stride_b + q_head * ml_stride_h)
-        alpha = tl.exp2(m_s - m)
-        acc_s = tl.load(
-            split_accum_ptr
-            + split * accum_stride_s
-            + batch * accum_stride_b
-            + q_head * accum_stride_h
-            + d_offsets * accum_stride_d,
-            mask=d_mask,
-            other=0.0,
-        ).to(tl.float32)
-        acc += alpha * acc_s
-        l += alpha * l_s
-
-    out = acc / l
-    tl.store(
-        out_ptr + batch * out_stride_b + q_head * out_stride_h + d_offsets * out_stride_d,
-        out,
-        mask=d_mask,
-    )
-
-
 def _cache_dict(past_key_value) -> dict[int, Int4KVLayerCache]:
     caches = getattr(past_key_value, "_int4_kv_layer_caches", None)
     if caches is None:
@@ -756,6 +528,7 @@ def _decode_attention(
         raise ValueError(f"Fused INT4 decode attention expects q_len=1, got {q_len}")
     out = torch.empty((batch, n_heads, head_dim), device=query_states.device, dtype=query_states.dtype)
     block_d = triton.next_power_of_2(head_dim)
+    grid = (batch * n_heads,)
     mask = _decode_attention_mask(attention_mask, batch, seq_len, query_states.device)
     if mask is None:
         mask_strides = (0, 0, 0, 0)
@@ -763,56 +536,6 @@ def _decode_attention(
     else:
         mask_strides = mask.stride()
         mask_k_len = mask.shape[-1]
-    num_splits = _decode_num_splits(seq_len)
-    if num_splits > 1:
-        split_accum, split_m, split_l = _ensure_decode_scratch(cache, num_splits, batch, n_heads, head_dim)
-        _int4_decode_attention_split_kernel[(batch * n_heads, num_splits)](
-            query_states,
-            cache.k_packed,
-            cache.v_packed,
-            cache.k_scale,
-            cache.v_scale,
-            mask,
-            split_accum,
-            split_m,
-            split_l,
-            query_states.stride(0),
-            query_states.stride(1),
-            query_states.stride(2),
-            query_states.stride(3),
-            *cache.k_packed.stride(),
-            *cache.v_packed.stride(),
-            *cache.k_scale.stride(),
-            *cache.v_scale.stride(),
-            *mask_strides,
-            *split_accum.stride(),
-            *split_m.stride(),
-            seq_len,
-            mask_k_len,
-            n_heads,
-            num_key_value_groups,
-            head_dim,
-            group_size,
-            num_splits,
-            BLOCK_N=64,
-            BLOCK_D=block_d,
-        )
-        _int4_decode_attention_split_combine_kernel[(batch * n_heads,)](
-            split_accum,
-            split_m,
-            split_l,
-            out,
-            *split_accum.stride(),
-            *split_m.stride(),
-            *out.stride(),
-            n_heads,
-            head_dim,
-            num_splits,
-            BLOCK_D=block_d,
-        )
-        return out
-
-    grid = (batch * n_heads,)
     _int4_decode_attention_kernel[grid](
         query_states,
         cache.k_packed,
@@ -841,31 +564,6 @@ def _decode_attention(
         BLOCK_D=block_d,
     )
     return out
-
-
-def _decode_num_splits(seq_len: int) -> int:
-    if seq_len >= 2048:
-        return 8
-    if seq_len >= 1024:
-        return 4
-    return 1
-
-
-def _ensure_decode_scratch(
-    cache: Int4KVLayerCache,
-    num_splits: int,
-    batch: int,
-    n_heads: int,
-    head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    shape = (num_splits, batch, n_heads, head_dim)
-    if cache.split_shape != shape or cache.split_accum is None or cache.split_m is None or cache.split_l is None:
-        device = cache.k_packed.device
-        cache.split_accum = torch.empty(shape, device=device, dtype=torch.float32)
-        cache.split_m = torch.empty((num_splits, batch, n_heads), device=device, dtype=torch.float32)
-        cache.split_l = torch.empty((num_splits, batch, n_heads), device=device, dtype=torch.float32)
-        cache.split_shape = shape
-    return cache.split_accum, cache.split_m, cache.split_l
 
 
 def _decode_attention_mask(
