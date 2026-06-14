@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from hybrid_quant.int4_8b_attention import patch_nemotron_h_attention_int4_kv
+from hybrid_quant.flash_attention import patch_nemotron_h_attention_flash
 from hybrid_quant.mamba_state_8b_kernel import (
     patch_nemotron_h_mamba_decode_state_kernel,
     register_mamba_state_kernel_caches,
@@ -49,6 +50,7 @@ def main() -> None:
     parser.add_argument("--decode-steps", type=int, default=32)
     parser.add_argument("--warmup-steps", type=int, default=8)
     parser.add_argument("--kv-group-size", type=int, default=64)
+    parser.add_argument("--attention-backend", choices=["sdpa", "flash"], default="sdpa")
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
 
@@ -63,6 +65,8 @@ def main() -> None:
             torch_dtype=torch.bfloat16,
         ).cuda().eval()
         patch_attention_cache_in_blocks(model)
+        if args.attention_backend == "flash" and kv_quantization != "int4":
+            patch_nemotron_h_attention_flash(model)
         if kv_quantization == "int4":
             patch_nemotron_h_attention_int4_kv(model, group_size=args.kv_group_size)
         if state_quantization == "mx8":
@@ -115,6 +119,7 @@ def main() -> None:
                         "mode": args.mode,
                         "kv_quantization": kv_quantization,
                         "state_quantization": state_quantization,
+                        "attention_backend": "int4_fused" if kv_quantization == "int4" else args.attention_backend,
                         "batch_size": args.batch_size,
                         "sequence_length": args.sequence_length,
                         "decode_steps": args.decode_steps,
