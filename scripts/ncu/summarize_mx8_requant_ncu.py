@@ -9,7 +9,7 @@ from pathlib import Path
 
 STATIC_METRICS = {
     "duration_ns": [r"^duration$", r"gpu__time_duration"],
-    "sm_throughput_pct": [r"compute \\(sm\\) throughput", r"sm__throughput.*pct"],
+    "sm_throughput_pct": [r"compute \(sm\) throughput", r"sm__throughput.*pct"],
     "dram_throughput_pct": [r"^dram throughput$", r"dram__throughput.*pct"],
     "memory_throughput_pct": [r"^memory throughput$"],
     "memory_throughput_bps": [r"^memory throughput$"],
@@ -47,7 +47,7 @@ STATIC_METRICS = {
 }
 
 
-STALL_RE = re.compile(r"warp_issue_stalled_([a-z_]+)_per_warp_active\\.pct")
+STALL_RE = re.compile(r"warp_issue_stalled_([a-z_]+)_per_warp_active\.pct")
 
 
 def parse_float(value: str) -> float | None:
