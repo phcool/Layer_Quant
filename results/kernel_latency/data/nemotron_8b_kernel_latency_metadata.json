@@ -1,0 +1,17 @@
+{
+  "tool": "Nsight Systems",
+  "nsys_version": "2024.5.1.113-245134619542v0",
+  "model": "Nemotron-H-8B",
+  "batch_size": 8,
+  "context_length": 2048,
+  "decode_steps": 32,
+  "warmup_steps": 8,
+  "modes": [
+    "none",
+    "kv_int4",
+    "state_mx8",
+    "kv_int4_state_mx8"
+  ],
+  "capture": "cudaProfilerStart/Stop around decode loop only",
+  "gpu": "NVIDIA A100 80GB PCIe"
+}
