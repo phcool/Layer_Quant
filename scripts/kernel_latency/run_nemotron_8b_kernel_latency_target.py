@@ -46,11 +46,10 @@ def main() -> None:
     parser.add_argument("--mode", choices=sorted(QUANTIZATION_MODES), required=True)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--sequence-length", type=int, default=2048)
-    parser.add_argument("--decode-steps", type=int, default=1)
-    parser.add_argument("--warmup-steps", type=int, default=4)
+    parser.add_argument("--decode-steps", type=int, default=32)
+    parser.add_argument("--warmup-steps", type=int, default=8)
     parser.add_argument("--kv-group-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--use-cuda-profiler-api", action="store_true")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -70,7 +69,7 @@ def main() -> None:
             patch_nemotron_h_mamba_decode_state_kernel(model, group_size=16, stochastic=True, seed=args.seed)
 
         config = AutoConfig.from_pretrained(args.repo, trust_remote_code=True)
-        mamba_layers, attention_layers, mlp_layers = layer_groups(config)
+        mamba_layers, attention_layers, _ = layer_groups(config)
         mode_by_layer = {idx: "mx8" for idx in mamba_layers} if state_quantization == "mx8" else {}
         ids = make_batch_ids(
             args.repo,
@@ -79,13 +78,18 @@ def main() -> None:
             args.sequence_length,
             args.warmup_steps + args.decode_steps,
         ).to(device)
+        positions = torch.arange(
+            args.sequence_length + args.warmup_steps + args.decode_steps + 1,
+            device=device,
+            dtype=torch.long,
+        )
         cache = make_hybrid_cache(model, batch_size=args.batch_size)
 
         with torch.inference_mode():
             model(
                 input_ids=ids[:, : args.sequence_length],
                 cache_params=cache,
-                cache_position=torch.arange(args.sequence_length, device=device, dtype=torch.long),
+                cache_position=positions[: args.sequence_length],
                 use_cache=True,
                 return_dict=True,
             )
@@ -97,7 +101,7 @@ def main() -> None:
                 model(
                     input_ids=ids[:, next_pos : next_pos + 1],
                     cache_params=cache,
-                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    cache_position=positions[next_pos : next_pos + 1],
                     use_cache=True,
                     return_dict=True,
                 )
@@ -114,24 +118,25 @@ def main() -> None:
                         "batch_size": args.batch_size,
                         "sequence_length": args.sequence_length,
                         "decode_steps": args.decode_steps,
+                        "warmup_steps": args.warmup_steps,
                     }
                 ),
                 flush=True,
             )
-            if args.use_cuda_profiler_api:
-                cuda_profiler_start()
-            for _ in range(args.decode_steps):
+            cuda_profiler_start()
+            for step_idx in range(args.decode_steps):
+                torch.cuda.nvtx.range_push(f"decode_step_{step_idx}")
                 model(
                     input_ids=ids[:, next_pos : next_pos + 1],
                     cache_params=cache,
-                    cache_position=torch.tensor([next_pos], device=device, dtype=torch.long),
+                    cache_position=positions[next_pos : next_pos + 1],
                     use_cache=True,
                     return_dict=True,
                 )
+                torch.cuda.nvtx.range_pop()
                 next_pos += 1
+            cuda_profiler_stop()
             torch.cuda.synchronize(device)
-            if args.use_cuda_profiler_api:
-                cuda_profiler_stop()
             print(json.dumps({"event": "profile_stop", "mode": args.mode}), flush=True)
     finally:
         if model is not None:
