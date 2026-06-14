@@ -33,6 +33,8 @@ def classify_kernel(kernel_name: str) -> str:
         return "mamba_state_update_baseline"
     if "_state_update_mx8_kernel" in name:
         return "mamba_state_update_mx8"
+    if "_state_update_requant_mx8_row_kernel" in name:
+        return "mamba_state_update_requant_mx8"
     if "_requantize_mx8_kernel" in name:
         return "mamba_state_requantize_mx8"
     if "causal_conv1d_update_kernel" in name:
@@ -124,11 +126,11 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def summarize(input_dir: Path, decode_steps: int) -> tuple[list[dict], list[dict]]:
+def summarize(input_dir: Path, decode_steps: int, input_template: str, modes: list[str]) -> tuple[list[dict], list[dict]]:
     kernel_rows = []
     category_rows = []
-    for mode in MODE_ORDER:
-        rows = read_nsys_kernel_summary(input_dir / f"nemotron_8b_{mode}_nsys_cuda_gpu_kern_sum.csv")
+    for mode in modes:
+        rows = read_nsys_kernel_summary(input_dir / input_template.format(mode=mode))
         total_mode_ms = sum(row["total_ms"] for row in rows)
         by_category: dict[str, dict] = {}
         for row in rows:
@@ -163,6 +165,9 @@ def summarize(input_dir: Path, decode_steps: int) -> tuple[list[dict], list[dict
             if row["category"] in {"mamba_state_update_baseline", "mamba_state_update_mx8"}
         )
         requant_ms = sum(row["total_ms"] for row in rows if row["category"] == "mamba_state_requantize_mx8")
+        fused_update_requant_ms = sum(
+            row["total_ms"] for row in rows if row["category"] == "mamba_state_update_requant_mx8"
+        )
         conv_ms = sum(row["total_ms"] for row in rows if row["category"] == "mamba_conv_update")
         category_rows.append(
             {
@@ -200,11 +205,18 @@ def summarize(input_dir: Path, decode_steps: int) -> tuple[list[dict], list[dict
                     row["calls"] or 0
                     for row in rows
                     if row["category"]
-                    in {"mamba_state_update_baseline", "mamba_state_update_mx8", "mamba_state_requantize_mx8"}
+                    in {
+                        "mamba_state_update_baseline",
+                        "mamba_state_update_mx8",
+                        "mamba_state_requantize_mx8",
+                        "mamba_state_update_requant_mx8",
+                    }
                 ),
-                "total_ms": update_ms + requant_ms,
-                "avg_ms_per_decode_step": (update_ms + requant_ms) / decode_steps,
-                "pct_of_mode_kernel_time": (update_ms + requant_ms) / total_mode_ms * 100.0 if total_mode_ms else None,
+                "total_ms": update_ms + requant_ms + fused_update_requant_ms,
+                "avg_ms_per_decode_step": (update_ms + requant_ms + fused_update_requant_ms) / decode_steps,
+                "pct_of_mode_kernel_time": (update_ms + requant_ms + fused_update_requant_ms) / total_mode_ms * 100.0
+                if total_mode_ms
+                else None,
             }
         )
         category_rows.append(
@@ -225,9 +237,12 @@ def main() -> None:
     parser.add_argument("--input-dir", default="results/kernel_latency/data")
     parser.add_argument("--decode-steps", type=int, default=32)
     parser.add_argument("--output-prefix", default="results/kernel_latency/data/nemotron_8b_kernel_latency")
+    parser.add_argument("--input-template", default="nemotron_8b_{mode}_nsys_cuda_gpu_kern_sum.csv")
+    parser.add_argument("--modes", default=",".join(MODE_ORDER))
     args = parser.parse_args()
 
-    category_rows, kernel_rows = summarize(Path(args.input_dir), args.decode_steps)
+    modes = [item.strip() for item in args.modes.split(",") if item.strip()]
+    category_rows, kernel_rows = summarize(Path(args.input_dir), args.decode_steps, args.input_template, modes)
     output_prefix = Path(args.output_prefix)
     write_csv(output_prefix.with_name(output_prefix.name + "_category_summary.csv"), category_rows)
     write_csv(output_prefix.with_name(output_prefix.name + "_kernel_summary.csv"), kernel_rows)
