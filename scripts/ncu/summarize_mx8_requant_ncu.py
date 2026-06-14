@@ -11,10 +11,12 @@ INTERESTING_METRICS = {
     "long_scoreboard_pct": [r"long.*scoreboard.*pct"],
     "lg_throttle_pct": [r"lg.*throttle.*pct"],
     "tensor_active_pct": [r"pipe_tensor.*active.*pct", r"tensor.*active.*pct"],
+    "tensor_inst": [r"inst.*pipe_tensor"],
+    "sm_throughput_pct": [r"sm__throughput.*pct"],
     "sm_active_pct": [r"sm.*active.*pct"],
     "integer_inst": [r"inst.*integer", r"thread_inst_executed.*integer"],
-    "local_load_bytes": [r"local.*load.*bytes"],
-    "local_store_bytes": [r"local.*store.*bytes"],
+    "local_load_bytes": [r"local.*load.*bytes", r"mem_local_op_ld"],
+    "local_store_bytes": [r"local.*store.*bytes", r"mem_local_op_st"],
     "local_memory_overhead": [r"local.*memory.*overhead"],
 }
 
@@ -45,8 +47,16 @@ def metric_bucket(metric_name: str) -> str | None:
 def read_ncu_csv(path: Path) -> list[dict[str, float]]:
     rows: list[dict[str, float]] = []
     current: dict[str, float] = {}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    header_idx = None
+    for idx, line in enumerate(lines):
+        if '"Metric Name"' in line and '"Metric Value"' in line:
+            header_idx = idx
+            break
+    if header_idx is None:
+        return rows
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(lines[header_idx:])
         for row in reader:
             metric = row.get("Metric Name") or row.get("Metric Name:") or row.get("Name") or ""
             value = row.get("Metric Value") or row.get("Metric Value:") or row.get("Value") or ""
