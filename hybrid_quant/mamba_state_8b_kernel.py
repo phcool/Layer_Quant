@@ -34,6 +34,195 @@ def _softplus(x):
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
 @triton.jit
+def _state_update_requant_mx8_row_kernel(
+    q_state_ptr,
+    shared_exp_ptr,
+    micro_exp_ptr,
+    x_ptr,
+    dt_ptr,
+    dt_bias_ptr,
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    D_ptr,
+    z_ptr,
+    out_ptr,
+    nheads_ngroups_ratio: tl.constexpr,
+    stride_q_batch: tl.constexpr,
+    stride_q_head: tl.constexpr,
+    stride_q_dim: tl.constexpr,
+    stride_q_dstate: tl.constexpr,
+    stride_exp_batch: tl.constexpr,
+    stride_exp_head: tl.constexpr,
+    stride_exp_dim: tl.constexpr,
+    stride_exp_group: tl.constexpr,
+    stride_micro_batch: tl.constexpr,
+    stride_micro_head: tl.constexpr,
+    stride_micro_dim: tl.constexpr,
+    stride_micro_pair: tl.constexpr,
+    stride_x_batch: tl.constexpr,
+    stride_x_head: tl.constexpr,
+    stride_x_dim: tl.constexpr,
+    stride_dt_batch: tl.constexpr,
+    stride_dt_head: tl.constexpr,
+    stride_dt_dim: tl.constexpr,
+    stride_A_head: tl.constexpr,
+    stride_A_dim: tl.constexpr,
+    stride_A_dstate: tl.constexpr,
+    stride_B_batch: tl.constexpr,
+    stride_B_group: tl.constexpr,
+    stride_B_dstate: tl.constexpr,
+    stride_C_batch: tl.constexpr,
+    stride_C_group: tl.constexpr,
+    stride_C_dstate: tl.constexpr,
+    stride_D_head: tl.constexpr,
+    stride_D_dim: tl.constexpr,
+    stride_z_batch: tl.constexpr,
+    stride_z_head: tl.constexpr,
+    stride_z_dim: tl.constexpr,
+    stride_out_batch: tl.constexpr,
+    stride_out_head: tl.constexpr,
+    stride_out_dim: tl.constexpr,
+    dim: tl.constexpr,
+    dstate: tl.constexpr,
+    dt_softplus: tl.constexpr,
+    HAS_DT_BIAS: tl.constexpr,
+    HAS_D: tl.constexpr,
+    HAS_Z: tl.constexpr,
+    STOCHASTIC: tl.constexpr,
+    RNG_SEED: tl.constexpr,
+    RNG_OFFSET: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_b = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_m = tl.program_id(2)
+    offs_n = tl.arange(0, BLOCK_N)
+    n_mask = offs_n < dstate
+
+    q = tl.load(
+        q_state_ptr
+        + pid_b * stride_q_batch
+        + pid_h * stride_q_head
+        + pid_m * stride_q_dim
+        + offs_n * stride_q_dstate,
+        mask=n_mask,
+        other=0,
+    ).to(tl.float32)
+    block_ids = offs_n // 16
+    pair_ids = offs_n // 2
+    shared_exp = tl.load(
+        shared_exp_ptr
+        + pid_b * stride_exp_batch
+        + pid_h * stride_exp_head
+        + pid_m * stride_exp_dim
+        + block_ids * stride_exp_group,
+        mask=n_mask,
+        other=127,
+    ).to(tl.float32)
+    micro_exp = tl.load(
+        micro_exp_ptr
+        + pid_b * stride_micro_batch
+        + pid_h * stride_micro_head
+        + pid_m * stride_micro_dim
+        + pair_ids * stride_micro_pair,
+        mask=n_mask,
+        other=0,
+    ).to(tl.float32)
+    state = q * tl.exp2(shared_exp - 127.0 + micro_exp)
+
+    x = tl.load(x_ptr + pid_b * stride_x_batch + pid_h * stride_x_head + pid_m * stride_x_dim).to(tl.float32)
+    dt = tl.load(dt_ptr + pid_b * stride_dt_batch + pid_h * stride_dt_head + pid_m * stride_dt_dim).to(tl.float32)
+    if HAS_DT_BIAS:
+        dt += tl.load(dt_bias_ptr + pid_h * stride_D_head + pid_m * stride_D_dim).to(tl.float32)
+    if dt_softplus:
+        dt = _softplus(dt)
+
+    group = pid_h // nheads_ngroups_ratio
+    A = tl.load(
+        A_ptr + pid_h * stride_A_head + pid_m * stride_A_dim + offs_n * stride_A_dstate,
+        mask=n_mask,
+        other=0.0,
+    ).to(tl.float32)
+    B = tl.load(
+        B_ptr + pid_b * stride_B_batch + group * stride_B_group + offs_n * stride_B_dstate,
+        mask=n_mask,
+        other=0.0,
+    ).to(tl.float32)
+    C = tl.load(
+        C_ptr + pid_b * stride_C_batch + group * stride_C_group + offs_n * stride_C_dstate,
+        mask=n_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    state = state * tl.exp(A * dt) + B * dt * x
+    y = tl.sum(tl.where(n_mask, state * C, 0.0), axis=0)
+    if HAS_D:
+        D = tl.load(D_ptr + pid_h * stride_D_head + pid_m * stride_D_dim).to(tl.float32)
+        y += x * D
+    if HAS_Z:
+        z = tl.load(z_ptr + pid_b * stride_z_batch + pid_h * stride_z_head + pid_m * stride_z_dim).to(tl.float32)
+        y *= z
+    tl.store(out_ptr + pid_b * stride_out_batch + pid_h * stride_out_head + pid_m * stride_out_dim, y)
+
+    groups_per_row: tl.constexpr = BLOCK_N // 16
+    blocks = tl.reshape(state, (groups_per_row, 16))
+    abs_blocks = tl.abs(blocks)
+    amax = tl.max(abs_blocks, axis=1)
+    raw_exp = tl.ceil(tl.log2(tl.maximum(amax / 126.0, 1.0e-30)))
+    biased_exp = tl.minimum(tl.maximum(raw_exp + 127.0, 1.0), 254.0)
+    base_scale = tl.where(amax == 0.0, 1.0, tl.exp2(biased_exp - 127.0))
+
+    group_offsets = tl.arange(0, groups_per_row)
+    tl.store(
+        shared_exp_ptr
+        + pid_b * stride_exp_batch
+        + pid_h * stride_exp_head
+        + pid_m * stride_exp_dim
+        + group_offsets * stride_exp_group,
+        biased_exp.to(tl.uint8),
+        mask=group_offsets < (dstate // 16),
+    )
+
+    pair_vals = tl.reshape(blocks, (groups_per_row * 8, 2))
+    pair_amax = tl.max(tl.abs(pair_vals), axis=1)
+    base_per_pair = tl.reshape(tl.broadcast_to(tl.expand_dims(base_scale, 1), (groups_per_row, 8)), (groups_per_row * 8,))
+    micro_vec = tl.where(pair_amax > 63.0 * base_per_pair, 1, 0)
+    pair_scale = base_per_pair * tl.exp2(micro_vec.to(tl.float32))
+    q_abs = tl.minimum(tl.abs(pair_vals) / pair_scale[:, None], 63.0)
+    q_floor = tl.floor(q_abs)
+    pair_offsets = tl.arange(0, groups_per_row * 8)
+    elem_offsets = tl.reshape(tl.arange(0, BLOCK_N), (groups_per_row * 8, 2))
+    if STOCHASTIC:
+        row_id = (pid_b * tl.num_programs(1) + pid_h) * dim + pid_m
+        rnd = tl.rand(RNG_SEED, RNG_OFFSET + row_id * dstate + elem_offsets)
+        q_level = q_floor + (rnd < (q_abs - q_floor)).to(tl.float32)
+    else:
+        q_level = tl.floor(q_abs + 0.5)
+    q_level = tl.minimum(q_level, 63.0)
+    q_signed = tl.where(pair_vals < 0.0, -q_level, q_level).to(tl.int8)
+    q_flat = tl.reshape(q_signed, (BLOCK_N,))
+    tl.store(
+        q_state_ptr
+        + pid_b * stride_q_batch
+        + pid_h * stride_q_head
+        + pid_m * stride_q_dim
+        + offs_n * stride_q_dstate,
+        q_flat,
+        mask=n_mask,
+    )
+    tl.store(
+        micro_exp_ptr
+        + pid_b * stride_micro_batch
+        + pid_h * stride_micro_head
+        + pid_m * stride_micro_dim
+        + pair_offsets * stride_micro_pair,
+        micro_vec.to(tl.uint8),
+        mask=pair_offsets < (dstate // 2),
+    )
+
+
+@triton.jit
 def _state_update_mx8_kernel(
     q_state_ptr,
     shared_exp_ptr,
@@ -90,6 +279,10 @@ def _state_update_mx8_kernel(
     HAS_DT_BIAS: tl.constexpr,
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
+    FORMAT_BITS: tl.constexpr,
+    STOCHASTIC: tl.constexpr,
+    RNG_SEED: tl.constexpr,
+    RNG_OFFSET: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
@@ -174,15 +367,75 @@ def _state_update_mx8_kernel(
         ).to(tl.float32)
         y *= z
 
-    tl.store(
-        tmp_state_ptr
-        + pid_b * stride_q_batch
-        + pid_h * stride_q_head
-        + offs_m[:, None] * stride_q_dim
-        + offs_n[None, :] * stride_q_dstate,
-        state,
-        mask=mask,
-    )
+    if FORMAT_BITS == 8:
+        row_ids = (pid_b * tl.num_programs(2) + pid_h) * dim + offs_m
+        state_groups = tl.reshape(state, (BLOCK_SIZE_M, BLOCK_SIZE_N // 16, 16))
+        for group_start in tl.static_range(0, BLOCK_SIZE_N, 16):
+            if group_start < dstate:
+                group_vals = state_groups[:, group_start // 16, :]
+                group_vals = tl.where(offs_m[:, None] < dim, group_vals, 0.0)
+                abs_vals = tl.abs(group_vals)
+                amax = tl.max(abs_vals, axis=1)
+                raw_exp = tl.ceil(tl.log2(tl.maximum(amax / 126.0, 1.0e-30)))
+                biased_exp = tl.minimum(tl.maximum(raw_exp + 127.0, 1.0), 254.0)
+                base_scale = tl.where(amax == 0.0, 1.0, tl.exp2(biased_exp - 127.0))
+                tl.store(
+                    shared_exp_ptr
+                    + pid_b * stride_exp_batch
+                    + pid_h * stride_exp_head
+                    + offs_m * stride_exp_dim
+                    + (group_start // 16) * stride_exp_group,
+                    biased_exp.to(tl.uint8),
+                    mask=offs_m < dim,
+                )
+                group_pairs = tl.reshape(group_vals, (BLOCK_SIZE_M, 8, 2))
+                for pair_start in tl.static_range(0, 16, 2):
+                    pair_vals = group_pairs[:, pair_start // 2, :]
+                    pair_amax = tl.max(tl.abs(pair_vals), axis=1)
+                    micro_vec = tl.where(pair_amax > 63.0 * base_scale, 1, 0)
+                    scale = base_scale * tl.exp2(micro_vec.to(tl.float32))
+                    q_abs = tl.minimum(tl.abs(pair_vals) / scale[:, None], 63.0)
+                    q_floor = tl.floor(q_abs)
+                    if STOCHASTIC:
+                        rng_offsets = (
+                            RNG_OFFSET
+                            + row_ids[:, None] * dstate
+                            + (group_start + pair_start + tl.arange(0, 2))[None, :]
+                        )
+                        rnd = tl.rand(RNG_SEED, rng_offsets)
+                        q_level = q_floor + (rnd < (q_abs - q_floor)).to(tl.float32)
+                    else:
+                        q_level = tl.floor(q_abs + 0.5)
+                    q_level = tl.minimum(q_level, 63.0)
+                    q_signed = tl.where(pair_vals < 0.0, -q_level, q_level).to(tl.int8)
+                    tl.store(
+                        q_state_ptr
+                        + pid_b * stride_q_batch
+                        + pid_h * stride_q_head
+                        + offs_m[:, None] * stride_q_dim
+                        + (group_start + pair_start + tl.arange(0, 2))[None, :] * stride_q_dstate,
+                        q_signed,
+                        mask=offs_m[:, None] < dim,
+                    )
+                    tl.store(
+                        micro_exp_ptr
+                        + pid_b * stride_micro_batch
+                        + pid_h * stride_micro_head
+                        + offs_m * stride_micro_dim
+                        + ((group_start + pair_start) // 2) * stride_micro_pair,
+                        micro_vec.to(tl.uint8),
+                        mask=offs_m < dim,
+                    )
+    else:
+        tl.store(
+            tmp_state_ptr
+            + pid_b * stride_q_batch
+            + pid_h * stride_q_head
+            + offs_m[:, None] * stride_q_dim
+            + offs_n[None, :] * stride_q_dstate,
+            state,
+            mask=mask,
+        )
     tl.store(
         out_ptr + pid_b * stride_out_batch + pid_h * stride_out_head + offs_m * stride_out_dim,
         y,
@@ -368,11 +621,49 @@ def mx_state_selective_update(
         raise ValueError("Expected B and C with shape [batch, ngroups, dstate] for decode update.")
     nheads_ngroups_ratio = nheads // B.shape[1]
     out = torch.empty_like(x)
-    tmp_state = torch.empty(cache.q_state.shape, dtype=torch.float32, device=cache.q_state.device)
-
-    grid = (triton.cdiv(dim, 16), batch, nheads)
     d_strides = D.stride() if D is not None else (0, 0)
     z_strides = z.stride() if z is not None else (0, 0, 0)
+
+    if cache.format_bits == 8:
+        grid = (batch, nheads, dim)
+        _state_update_requant_mx8_row_kernel[grid](
+            cache.q_state,
+            cache.shared_exp,
+            cache.micro_exp,
+            x,
+            dt,
+            dt_bias,
+            A,
+            B,
+            C,
+            D,
+            z,
+            out,
+            nheads_ngroups_ratio,
+            *cache.q_state.stride(),
+            *cache.shared_exp.stride(),
+            *cache.micro_exp.stride(),
+            *x.stride(),
+            *dt.stride(),
+            *A.stride(),
+            *B.stride(),
+            *C.stride(),
+            *d_strides,
+            *z_strides,
+            *out.stride(),
+            dim,
+            dstate,
+            dt_softplus,
+            STOCHASTIC=stochastic,
+            RNG_SEED=seed,
+            RNG_OFFSET=cache.step * batch * nheads * dim * dstate,
+            BLOCK_N=triton.next_power_of_2(dstate),
+        )
+        cache.step += 1
+        return out
+
+    tmp_state = torch.empty(cache.q_state.shape, dtype=torch.float32, device=cache.q_state.device)
+    grid = (triton.cdiv(dim, 16), batch, nheads)
     _state_update_mx8_kernel[grid](
         cache.q_state,
         cache.shared_exp,
@@ -402,25 +693,16 @@ def mx_state_selective_update(
         dim,
         dstate,
         dt_softplus,
+        FORMAT_BITS=cache.format_bits,
+        STOCHASTIC=stochastic,
+        RNG_SEED=seed,
+        RNG_OFFSET=cache.step * batch * nheads * dim * dstate,
         BLOCK_SIZE_M=16,
         BLOCK_SIZE_N=triton.next_power_of_2(dstate),
     )
 
     rows = batch * nheads * dim
-    if cache.format_bits == 8:
-        requant_grid = (rows * (dstate // MX8_BLOCK_SIZE),)
-        _requantize_mx8_kernel[requant_grid](
-            tmp_state,
-            cache.q_state,
-            cache.shared_exp,
-            cache.micro_exp,
-            rows,
-            dstate,
-            stochastic,
-            seed,
-            cache.step * rows * dstate,
-        )
-    elif cache.format_bits == 4:
+    if cache.format_bits == 4:
         requant_grid = (rows * (dstate // MX4_BLOCK_SIZE),)
         _requantize_mx4_kernel[requant_grid](
             tmp_state,
