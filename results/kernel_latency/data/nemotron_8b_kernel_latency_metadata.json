@@ -12,6 +12,7 @@
     "state_mx8",
     "kv_int4_state_mx8"
   ],
+  "state_mx8_kernel": "fused update+requant",
   "capture": "cudaProfilerStart/Stop around decode loop only",
   "gpu": "NVIDIA A100 80GB PCIe"
 }
