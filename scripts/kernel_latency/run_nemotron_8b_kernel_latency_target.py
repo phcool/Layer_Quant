@@ -135,8 +135,8 @@ def main() -> None:
                 )
                 torch.cuda.nvtx.range_pop()
                 next_pos += 1
-            cuda_profiler_stop()
             torch.cuda.synchronize(device)
+            cuda_profiler_stop()
             print(json.dumps({"event": "profile_stop", "mode": args.mode}), flush=True)
     finally:
         if model is not None:
