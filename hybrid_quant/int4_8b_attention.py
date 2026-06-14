@@ -251,6 +251,7 @@ def _int4_prefill_attention_kernel(
     )
 
 
+@triton.heuristics({"HAS_ATTN_MASK": lambda args: args["mask_ptr"] is not None})
 @triton.jit
 def _int4_decode_attention_kernel(
     q_ptr,
@@ -258,6 +259,7 @@ def _int4_decode_attention_kernel(
     v_packed_ptr,
     k_scale_ptr,
     v_scale_ptr,
+    mask_ptr,
     out_ptr,
     q_stride_b,
     q_stride_h,
@@ -279,16 +281,22 @@ def _int4_decode_attention_kernel(
     vs_stride_h,
     vs_stride_t,
     vs_stride_g,
+    mask_stride_b,
+    mask_stride_h,
+    mask_stride_q,
+    mask_stride_k,
     out_stride_b,
     out_stride_h,
     out_stride_d,
     seq_len,
+    mask_k_len,
     n_query_heads: tl.constexpr,
     num_key_value_groups: tl.constexpr,
     head_dim: tl.constexpr,
     group_size: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    HAS_ATTN_MASK: tl.constexpr,
 ):
     bh = tl.program_id(0)
     batch = bh // n_query_heads
@@ -340,6 +348,14 @@ def _int4_decode_attention_kernel(
             scores += tl.sum(k * q_group[None, :], axis=1)
 
         scores = tl.where(n_mask, scores * scale_sm, -float("inf"))
+        if HAS_ATTN_MASK:
+            mask_valid = n < mask_k_len
+            mask_bias = tl.load(
+                mask_ptr + batch * mask_stride_b + n * mask_stride_k,
+                mask=n_mask & mask_valid,
+                other=-float("inf"),
+            ).to(tl.float32)
+            scores += mask_bias
         m_new = tl.maximum(m_i, tl.max(scores, axis=0))
         alpha = tl.exp2(m_i - m_new)
         p = tl.exp2(scores - m_new)
@@ -505,6 +521,7 @@ def _decode_attention(
     seq_len: int,
     num_key_value_groups: int,
     group_size: int,
+    attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch, n_heads, q_len, head_dim = query_states.shape
     if q_len != 1:
@@ -512,12 +529,20 @@ def _decode_attention(
     out = torch.empty((batch, n_heads, head_dim), device=query_states.device, dtype=query_states.dtype)
     block_d = triton.next_power_of_2(head_dim)
     grid = (batch * n_heads,)
+    mask = _decode_attention_mask(attention_mask, batch, seq_len, query_states.device)
+    if mask is None:
+        mask_strides = (0, 0, 0, 0)
+        mask_k_len = 0
+    else:
+        mask_strides = mask.stride()
+        mask_k_len = mask.shape[-1]
     _int4_decode_attention_kernel[grid](
         query_states,
         cache.k_packed,
         cache.v_packed,
         cache.k_scale,
         cache.v_scale,
+        mask,
         out,
         query_states.stride(0),
         query_states.stride(1),
@@ -527,8 +552,10 @@ def _decode_attention(
         *cache.v_packed.stride(),
         *cache.k_scale.stride(),
         *cache.v_scale.stride(),
+        *mask_strides,
         *out.stride(),
         seq_len,
+        mask_k_len,
         n_heads,
         num_key_value_groups,
         head_dim,
@@ -537,6 +564,31 @@ def _decode_attention(
         BLOCK_D=block_d,
     )
     return out
+
+
+def _decode_attention_mask(
+    attention_mask: torch.Tensor | None,
+    batch: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if attention_mask is None:
+        return None
+    if attention_mask.dim() == 4:
+        mask = attention_mask[:, :, -1:, :seq_len].to(device=device)
+        if mask.dtype == torch.bool:
+            bias = torch.zeros(mask.shape, device=device, dtype=torch.float32)
+            return bias.masked_fill(~mask, -float("inf")).contiguous()
+        return mask.to(dtype=torch.float32).contiguous()
+    if attention_mask.dim() == 2:
+        mask = attention_mask[:, -seq_len:].to(device=device)
+        if mask.dtype == torch.bool:
+            keep = mask
+        else:
+            keep = mask != 0
+        bias = torch.zeros((batch, 1, 1, seq_len), device=device, dtype=torch.float32)
+        return bias.masked_fill(~keep[:, None, None, :], -float("inf"))
+    raise ValueError(f"INT4 decode attention only supports 2D or 4D attention_mask, got {attention_mask.dim()}D")
 
 
 def _prefill_attention(
@@ -632,6 +684,7 @@ def _forward_fused_int4_kv(
             required_len,
             self.num_key_value_groups,
             group_size,
+            attention_mask=attention_mask,
         )
         attn_output = attn_output.unsqueeze(2).transpose(1, 2).contiguous().view(bsz, q_len, self.hidden_size)
         attn_output = self.o_proj(attn_output)
