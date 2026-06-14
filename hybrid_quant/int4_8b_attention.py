@@ -526,6 +526,9 @@ def _decode_attention(
     batch, n_heads, q_len, head_dim = query_states.shape
     if q_len != 1:
         raise ValueError(f"Fused INT4 decode attention expects q_len=1, got {q_len}")
+    flash_out = _flash_decode_attention(query_states, cache, seq_len, group_size, attention_mask)
+    if flash_out is not None:
+        return flash_out
     out = torch.empty((batch, n_heads, head_dim), device=query_states.device, dtype=query_states.dtype)
     block_d = triton.next_power_of_2(head_dim)
     grid = (batch * n_heads,)
@@ -564,6 +567,42 @@ def _decode_attention(
         BLOCK_D=block_d,
     )
     return out
+
+
+def _flash_decode_attention(
+    query_states: torch.Tensor,
+    cache: Int4KVLayerCache,
+    seq_len: int,
+    group_size: int,
+    attention_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if attention_mask is not None:
+        return None
+    try:
+        import flash_attn_2_cuda
+    except ImportError:
+        return None
+    if not hasattr(flash_attn_2_cuda, "fwd_kvcache_int4"):
+        return None
+
+    batch, n_heads, q_len, head_dim = query_states.shape
+    q = query_states.transpose(1, 2)
+    out, _ = flash_attn_2_cuda.fwd_kvcache_int4(
+        q,
+        cache.k_packed[:, :, :seq_len, :],
+        cache.v_packed[:, :, :seq_len, :],
+        cache.k_scale[:, :, :seq_len, :],
+        cache.v_scale[:, :, :seq_len, :],
+        None,
+        head_dim ** -0.5,
+        False,
+        -1,
+        -1,
+        0.0,
+        0,
+        group_size,
+    )
+    return out.reshape(batch, q_len, n_heads, head_dim).transpose(1, 2).squeeze(2)
 
 
 def _decode_attention_mask(
