@@ -241,6 +241,13 @@ void set_params_dgrad(Flash_bwd_params &params,
 }
 
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+#ifdef FLASH_ATTN_INT4_DECODE_ONLY
+    TORCH_CHECK(params.is_bf16, "INT4 decode-only FlashAttention build only supports bf16");
+    TORCH_CHECK(params.d == 128, "INT4 decode-only FlashAttention build only supports head_dim=128");
+    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 128, Is_causal>(params, stream);
+    });
+#else
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
@@ -252,6 +259,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
             });
         });
     });
+#endif
 }
 
 // Find the number of splits that maximizes the occupancy. For example, if we have
@@ -755,6 +763,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
+#ifdef FLASH_ATTN_INT4_DECODE_ONLY
+    TORCH_CHECK(false, "INT4 decode-only FlashAttention build does not support backward");
+#else
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
@@ -762,6 +773,7 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             });
         });
     });
+#endif
 }
 
 std::vector<at::Tensor>

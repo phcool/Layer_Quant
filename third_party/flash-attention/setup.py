@@ -376,7 +376,15 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_causal_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_causal_sm80.cu",
             ]
-    if os.getenv("FLASH_ATTN_FORWARD_ONLY", "0") == "1":
+    if os.getenv("FLASH_ATTN_INT4_DECODE_ONLY", "0") == "1":
+        flash_attn_sources = [
+            "csrc/flash_attn/flash_api.cpp",
+            "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu",
+            "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_causal_sm80.cu",
+        ]
+        compiler_c17_flag.append("-DFLASH_ATTN_INT4_DECODE_ONLY")
+        nvcc_flags.append("-DFLASH_ATTN_INT4_DECODE_ONLY")
+    elif os.getenv("FLASH_ATTN_FORWARD_ONLY", "0") == "1":
         flash_attn_sources = [
             source
             for source in flash_attn_sources
