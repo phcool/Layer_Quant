@@ -110,6 +110,7 @@ def prefill_and_warmup(model, ids, positions, cache, sequence_length: int, warmu
             )
             next_pos += 1
         torch.cuda.synchronize()
+        controller.reset()
     return next_pos
 
 

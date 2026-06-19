@@ -137,6 +137,15 @@ def patch_low_freq_attention_blocks(model, controller: LowFreqAttentionControlle
                 return residual + delta
             if self.block_type == "attention":
                 layer_id = self.layer_idx
+                if hidden_states.shape[1] != 1:
+                    delta = self.mixer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        past_key_value=cache_params,
+                        use_cache=cache_params is not None,
+                        cache_position=cache_position,
+                    )[0]
+                    return residual + delta
                 ctrl.observe_hidden(layer_id, hidden_states)
                 if ctrl.should_run(layer_id):
                     delta = self.mixer(
