@@ -87,47 +87,49 @@ def _int4_kv_load_kernel(
     q_head = bh - batch * n_query_heads
     kv_head = q_head // num_key_value_groups
     n = block_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    d = tl.arange(0, BLOCK_D)
-    pair = d // 2
-    groups = d // group_size
-    mask = (n[:, None] < seq_len) & (d[None, :] < head_dim)
-    k_byte = tl.load(
-        k_packed_ptr
-        + batch * k_stride_b
-        + kv_head * k_stride_h
-        + n[:, None] * k_stride_t
-        + pair[None, :] * k_stride_p,
-        mask=mask,
-        other=0,
-    ).to(tl.float32)
-    v_byte = tl.load(
-        v_packed_ptr
-        + batch * v_stride_b
-        + kv_head * v_stride_h
-        + n[:, None] * v_stride_t
-        + pair[None, :] * v_stride_p,
-        mask=mask,
-        other=0,
-    ).to(tl.float32)
-    k_scale = tl.load(
-        k_scale_ptr
-        + batch * ks_stride_b
-        + kv_head * ks_stride_h
-        + n[:, None] * ks_stride_t
-        + groups[None, :] * ks_stride_g,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    v_scale = tl.load(
-        v_scale_ptr
-        + batch * vs_stride_b
-        + kv_head * vs_stride_h
-        + n[:, None] * vs_stride_t
-        + groups[None, :] * vs_stride_g,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    tl.store(out_ptr + bh * tl.num_programs(1) + block_n, tl.sum(k_byte + v_byte + k_scale + v_scale))
+    acc = tl.full((), 0.0, tl.float32)
+    for d_start in tl.static_range(0, BLOCK_D, group_size):
+        gd = d_start + tl.arange(0, group_size)
+        pair = gd // 2
+        mask = (n[:, None] < seq_len) & (gd[None, :] < head_dim)
+        k_byte = tl.load(
+            k_packed_ptr
+            + batch * k_stride_b
+            + kv_head * k_stride_h
+            + n[:, None] * k_stride_t
+            + pair[None, :] * k_stride_p,
+            mask=mask,
+            other=0,
+        ).to(tl.float32)
+        v_byte = tl.load(
+            v_packed_ptr
+            + batch * v_stride_b
+            + kv_head * v_stride_h
+            + n[:, None] * v_stride_t
+            + pair[None, :] * v_stride_p,
+            mask=mask,
+            other=0,
+        ).to(tl.float32)
+        k_scale = tl.load(
+            k_scale_ptr
+            + batch * ks_stride_b
+            + kv_head * ks_stride_h
+            + n * ks_stride_t
+            + (d_start // group_size) * ks_stride_g,
+            mask=n < seq_len,
+            other=0.0,
+        ).to(tl.float32)
+        v_scale = tl.load(
+            v_scale_ptr
+            + batch * vs_stride_b
+            + kv_head * vs_stride_h
+            + n * vs_stride_t
+            + (d_start // group_size) * vs_stride_g,
+            mask=n < seq_len,
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.sum(k_byte + v_byte) + tl.sum(k_scale + v_scale)
+    tl.store(out_ptr + bh * tl.num_programs(1) + block_n, acc)
 
 
 @triton.jit
@@ -167,52 +169,53 @@ def _int4_kv_dequant_kernel(
     q_head = bh - batch * n_query_heads
     kv_head = q_head // num_key_value_groups
     n = block_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    d = tl.arange(0, BLOCK_D)
-    pair = d // 2
-    groups = d // group_size
-    mask = (n[:, None] < seq_len) & (d[None, :] < head_dim)
-
-    k_byte = tl.load(
-        k_packed_ptr
-        + batch * k_stride_b
-        + kv_head * k_stride_h
-        + n[:, None] * k_stride_t
-        + pair[None, :] * k_stride_p,
-        mask=mask,
-        other=0,
-    ).to(tl.int32)
-    v_byte = tl.load(
-        v_packed_ptr
-        + batch * v_stride_b
-        + kv_head * v_stride_h
-        + n[:, None] * v_stride_t
-        + pair[None, :] * v_stride_p,
-        mask=mask,
-        other=0,
-    ).to(tl.int32)
-    k_nibble = tl.where((d[None, :] & 1) == 0, k_byte & 15, (k_byte >> 4) & 15)
-    v_nibble = tl.where((d[None, :] & 1) == 0, v_byte & 15, (v_byte >> 4) & 15)
-    k_signed = tl.where(k_nibble >= 8, k_nibble - 16, k_nibble).to(tl.float32)
-    v_signed = tl.where(v_nibble >= 8, v_nibble - 16, v_nibble).to(tl.float32)
-    k_scale = tl.load(
-        k_scale_ptr
-        + batch * ks_stride_b
-        + kv_head * ks_stride_h
-        + n[:, None] * ks_stride_t
-        + groups[None, :] * ks_stride_g,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    v_scale = tl.load(
-        v_scale_ptr
-        + batch * vs_stride_b
-        + kv_head * vs_stride_h
-        + n[:, None] * vs_stride_t
-        + groups[None, :] * vs_stride_g,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    tl.store(out_ptr + bh * tl.num_programs(1) + block_n, tl.sum(k_signed * k_scale + v_signed * v_scale))
+    acc = tl.full((), 0.0, tl.float32)
+    for d_start in tl.static_range(0, BLOCK_D, group_size):
+        gd = d_start + tl.arange(0, group_size)
+        pair = gd // 2
+        mask = (n[:, None] < seq_len) & (gd[None, :] < head_dim)
+        k_byte = tl.load(
+            k_packed_ptr
+            + batch * k_stride_b
+            + kv_head * k_stride_h
+            + n[:, None] * k_stride_t
+            + pair[None, :] * k_stride_p,
+            mask=mask,
+            other=0,
+        ).to(tl.int32)
+        v_byte = tl.load(
+            v_packed_ptr
+            + batch * v_stride_b
+            + kv_head * v_stride_h
+            + n[:, None] * v_stride_t
+            + pair[None, :] * v_stride_p,
+            mask=mask,
+            other=0,
+        ).to(tl.int32)
+        k_nibble = tl.where((gd[None, :] & 1) == 0, k_byte & 15, (k_byte >> 4) & 15)
+        v_nibble = tl.where((gd[None, :] & 1) == 0, v_byte & 15, (v_byte >> 4) & 15)
+        k_signed = tl.where(k_nibble >= 8, k_nibble - 16, k_nibble).to(tl.float32)
+        v_signed = tl.where(v_nibble >= 8, v_nibble - 16, v_nibble).to(tl.float32)
+        k_scale = tl.load(
+            k_scale_ptr
+            + batch * ks_stride_b
+            + kv_head * ks_stride_h
+            + n * ks_stride_t
+            + (d_start // group_size) * ks_stride_g,
+            mask=n < seq_len,
+            other=0.0,
+        ).to(tl.float32)
+        v_scale = tl.load(
+            v_scale_ptr
+            + batch * vs_stride_b
+            + kv_head * vs_stride_h
+            + n * vs_stride_t
+            + (d_start // group_size) * vs_stride_g,
+            mask=n < seq_len,
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.sum(k_signed * k_scale[:, None] + v_signed * v_scale[:, None])
+    tl.store(out_ptr + bh * tl.num_programs(1) + block_n, acc)
 
 
 @dataclass
