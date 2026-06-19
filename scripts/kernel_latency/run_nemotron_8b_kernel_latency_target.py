@@ -7,12 +7,13 @@ import sys
 from pathlib import Path
 
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from hybrid_quant.data import load_wikitext_texts
 from hybrid_quant.int4_8b_attention import patch_nemotron_h_attention_int4_kv
 from hybrid_quant.mamba_state_8b_kernel import (
     patch_nemotron_h_mamba_decode_state_kernel,
@@ -20,7 +21,6 @@ from hybrid_quant.mamba_state_8b_kernel import (
 )
 from hybrid_quant.nemotron_8b_decode_eval import layer_groups, make_hybrid_cache, patch_attention_cache_in_blocks
 MODEL_PATH = "/scratch2/wl730/models/nemotron-h-8b"
-from scripts.latency.run_nemotron_8b_latency import make_batch_ids
 
 
 QUANTIZATION_MODES = {
@@ -29,6 +29,23 @@ QUANTIZATION_MODES = {
     "state_mx8": ("none", "mx8"),
     "kv_int4_state_mx8": ("int4", "mx8"),
 }
+
+
+def make_batch_ids(repo: str, dataset: str, batch_size: int, seq_len: int, decode_steps: int) -> torch.Tensor:
+    texts = load_wikitext_texts(dataset, split="test")
+    tokenizer = AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
+    ids = tokenizer("\n\n".join(texts), add_special_tokens=False, return_tensors="pt").input_ids[0]
+    needed = seq_len + decode_steps + 1
+    rows = []
+    stride = needed
+    for batch_idx in range(batch_size):
+        start = batch_idx * stride
+        end = start + needed
+        if end > ids.numel():
+            start = 0
+            end = needed
+        rows.append(ids[start:end])
+    return torch.stack(rows, dim=0)
 
 
 def cuda_profiler_start() -> None:
