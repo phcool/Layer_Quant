@@ -209,3 +209,40 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_ca
   --interval 4 --correction-decay 0.95 --quality \
   --output-dir results/low_freq_attention_round2_quality/correction_cache/ctx8192_interval4_decay095
 ```
+
+## 2026-06-19 18:42 CST - Round 2B: Batch-2 Same-Runner Baseline
+
+### Motivation
+
+Round 2 quality screening used batch size 2 to keep CPU logits transfer manageable. The latency numbers from these quality runs need a same-batch full-attention baseline, because Round 1 baseline used batch size 8.
+
+### Goal
+
+Run full attention with the same low-frequency runner, batch size 2, context 8192, and decode 64. This provides the denominator for Round 2 speedup calculations.
+
+### Fixed Setup
+
+- Batch size: 2
+- Context length: 8192
+- Decode steps: 64
+- Warmup steps: 8
+- Interval: 1
+- Output directory: `results/low_freq_attention_round2_quality/baseline/full_attention_interval1`
+
+### Expected Sanity Check
+
+- `attention_runs = 4 * 64 = 256`
+- `attention_skips = 0`
+- `attention_run_fraction = 1.0`
+
+### Command
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/periodic_refresh/run.py \
+  --batch-size 2 \
+  --sequence-length 8192 \
+  --decode-steps 64 \
+  --warmup-steps 8 \
+  --interval 1 \
+  --output-dir results/low_freq_attention_round2_quality/baseline/full_attention_interval1
+```
