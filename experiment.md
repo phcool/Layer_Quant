@@ -246,3 +246,72 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/periodic_refr
   --interval 1 \
   --output-dir results/low_freq_attention_round2_quality/baseline/full_attention_interval1
 ```
+
+## 2026-06-19 18:48 CST - Round 3: Intermediate Interval and Correction Decay Sweep
+
+### Motivation
+
+Round 2 results show a real tradeoff:
+
+- `correction_cache interval=2`: best quality, KL about 0.168, top1 about 0.852, speedup about 1.076x.
+- `periodic interval=2`: slightly worse quality, KL about 0.213, speedup about 1.068x.
+- `correction_cache interval=4 decay=0.95`: better speedup about 1.131x, but KL rises to about 0.278.
+- `interval=8`: fastest, but quality is likely too degraded.
+
+The missing point is interval 3, plus a more systematic correction decay check around interval 4.
+
+### Goal
+
+Find a better latency/quality tradeoff between interval 2 and interval 4.
+
+### Fixed Setup
+
+- Batch size: 2
+- Context length: 8192
+- Decode steps: 64
+- Warmup steps: 8
+- Quality enabled
+- Output root: `results/low_freq_attention_round3_quality`
+
+### Experiments
+
+1. `periodic_refresh interval=3`
+2. `correction_cache interval=3 decay=1.0`
+3. `correction_cache interval=3 decay=0.95`
+4. `correction_cache interval=4 decay=0.90`
+5. `correction_cache interval=4 decay=0.99`
+
+### Analysis Plan
+
+- If interval 3 correction-cache has KL near interval 2 but speed closer to interval 4, keep it as the best candidate.
+- If decay improves top1/KL at interval 4 without much latency cost, keep decay as a useful design knob.
+- If decay does not help, the cached correction should probably be replaced with a learned or state-conditioned correction rather than simple reuse.
+
+### Commands
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/periodic_refresh/run.py \
+  --batch-size 2 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 3 --quality \
+  --output-dir results/low_freq_attention_round3_quality/periodic_refresh/ctx8192_interval3
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 2 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 3 --quality \
+  --output-dir results/low_freq_attention_round3_quality/correction_cache/ctx8192_interval3_reuse
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 2 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 3 --correction-decay 0.95 --quality \
+  --output-dir results/low_freq_attention_round3_quality/correction_cache/ctx8192_interval3_decay095
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 2 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 4 --correction-decay 0.90 --quality \
+  --output-dir results/low_freq_attention_round3_quality/correction_cache/ctx8192_interval4_decay090
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 2 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 4 --correction-decay 0.99 --quality \
+  --output-dir results/low_freq_attention_round3_quality/correction_cache/ctx8192_interval4_decay099
+```
