@@ -315,3 +315,51 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_ca
   --interval 4 --correction-decay 0.99 --quality \
   --output-dir results/low_freq_attention_round3_quality/correction_cache/ctx8192_interval4_decay099
 ```
+
+## 2026-06-19 18:56 CST - Round 4: Batch-8 Latency Validation for Pareto Candidates
+
+### Motivation
+
+Round 2 and Round 3 quality screening used batch size 2. The target latency setting is batch size 8, context 8192. Round 1 already measured batch-8 latency for interval 2, 4, and 8, but not interval 3 or the new interval-4 decay 0.90 candidate.
+
+### Goal
+
+Measure batch-8 latency for the candidate schedules that looked Pareto-relevant in quality screening:
+
+- `periodic_refresh interval=3`
+- `correction_cache interval=3 decay=0.95`
+- `correction_cache interval=4 decay=0.90`
+
+### Fixed Setup
+
+- Batch size: 8
+- Context length: 8192
+- Decode steps: 64
+- Warmup steps: 8
+- No quality pass
+- Output root: `results/low_freq_attention_round4_latency`
+
+### Analysis Plan
+
+- Compare against Round 1 full-attention batch-8 baseline: 38.986 ms/step.
+- Check whether interval 3 keeps a meaningful latency gap versus interval 2 and interval 4.
+- Use Round 2/3 quality results to select the best latency/quality operating point.
+
+### Commands
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/periodic_refresh/run.py \
+  --batch-size 8 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 3 \
+  --output-dir results/low_freq_attention_round4_latency/periodic_refresh/ctx8192_interval3
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 8 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 3 --correction-decay 0.95 \
+  --output-dir results/low_freq_attention_round4_latency/correction_cache/ctx8192_interval3_decay095
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/low_freq_attention/correction_cache/run.py \
+  --batch-size 8 --sequence-length 8192 --decode-steps 64 --warmup-steps 8 \
+  --interval 4 --correction-decay 0.90 \
+  --output-dir results/low_freq_attention_round4_latency/correction_cache/ctx8192_interval4_decay090
+```
