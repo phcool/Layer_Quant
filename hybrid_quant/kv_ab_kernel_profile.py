@@ -79,7 +79,7 @@ def _int4_kv_load_kernel(
     head_dim: tl.constexpr,
     group_size: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    BLOCK_P: tl.constexpr,
 ):
     bh = tl.program_id(0)
     block_n = tl.program_id(1)
@@ -88,16 +88,16 @@ def _int4_kv_load_kernel(
     kv_head = q_head // num_key_value_groups
     n = block_n * BLOCK_N + tl.arange(0, BLOCK_N)
     acc = tl.full((), 0.0, tl.float32)
-    for d_start in tl.static_range(0, BLOCK_D, group_size):
-        gd = d_start + tl.arange(0, group_size)
-        pair = gd // 2
-        mask = (n[:, None] < seq_len) & (gd[None, :] < head_dim)
+    for d_start in tl.static_range(0, head_dim, group_size):
+        pair_offsets = d_start // 2 + tl.arange(0, BLOCK_P)
+        pair_mask = pair_offsets < ((d_start + group_size) // 2)
+        mask = (n[:, None] < seq_len) & pair_mask[None, :]
         k_byte = tl.load(
             k_packed_ptr
             + batch * k_stride_b
             + kv_head * k_stride_h
             + n[:, None] * k_stride_t
-            + pair[None, :] * k_stride_p,
+            + pair_offsets[None, :] * k_stride_p,
             mask=mask,
             other=0,
         ).to(tl.float32)
@@ -106,7 +106,7 @@ def _int4_kv_load_kernel(
             + batch * v_stride_b
             + kv_head * v_stride_h
             + n[:, None] * v_stride_t
-            + pair[None, :] * v_stride_p,
+            + pair_offsets[None, :] * v_stride_p,
             mask=mask,
             other=0,
         ).to(tl.float32)
@@ -161,7 +161,7 @@ def _int4_kv_dequant_kernel(
     head_dim: tl.constexpr,
     group_size: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    BLOCK_P: tl.constexpr,
 ):
     bh = tl.program_id(0)
     block_n = tl.program_id(1)
@@ -170,16 +170,16 @@ def _int4_kv_dequant_kernel(
     kv_head = q_head // num_key_value_groups
     n = block_n * BLOCK_N + tl.arange(0, BLOCK_N)
     acc = tl.full((), 0.0, tl.float32)
-    for d_start in tl.static_range(0, BLOCK_D, group_size):
-        gd = d_start + tl.arange(0, group_size)
-        pair = gd // 2
-        mask = (n[:, None] < seq_len) & (gd[None, :] < head_dim)
+    for d_start in tl.static_range(0, head_dim, group_size):
+        pair_offsets = d_start // 2 + tl.arange(0, BLOCK_P)
+        pair_mask = pair_offsets < ((d_start + group_size) // 2)
+        mask = (n[:, None] < seq_len) & pair_mask[None, :]
         k_byte = tl.load(
             k_packed_ptr
             + batch * k_stride_b
             + kv_head * k_stride_h
             + n[:, None] * k_stride_t
-            + pair[None, :] * k_stride_p,
+            + pair_offsets[None, :] * k_stride_p,
             mask=mask,
             other=0,
         ).to(tl.int32)
@@ -188,14 +188,18 @@ def _int4_kv_dequant_kernel(
             + batch * v_stride_b
             + kv_head * v_stride_h
             + n[:, None] * v_stride_t
-            + pair[None, :] * v_stride_p,
+            + pair_offsets[None, :] * v_stride_p,
             mask=mask,
             other=0,
         ).to(tl.int32)
-        k_nibble = tl.where((gd[None, :] & 1) == 0, k_byte & 15, (k_byte >> 4) & 15)
-        v_nibble = tl.where((gd[None, :] & 1) == 0, v_byte & 15, (v_byte >> 4) & 15)
-        k_signed = tl.where(k_nibble >= 8, k_nibble - 16, k_nibble).to(tl.float32)
-        v_signed = tl.where(v_nibble >= 8, v_nibble - 16, v_nibble).to(tl.float32)
+        k_low = k_byte & 15
+        k_high = (k_byte >> 4) & 15
+        v_low = v_byte & 15
+        v_high = (v_byte >> 4) & 15
+        k_low = tl.where(k_low >= 8, k_low - 16, k_low).to(tl.float32)
+        k_high = tl.where(k_high >= 8, k_high - 16, k_high).to(tl.float32)
+        v_low = tl.where(v_low >= 8, v_low - 16, v_low).to(tl.float32)
+        v_high = tl.where(v_high >= 8, v_high - 16, v_high).to(tl.float32)
         k_scale = tl.load(
             k_scale_ptr
             + batch * ks_stride_b
@@ -214,7 +218,9 @@ def _int4_kv_dequant_kernel(
             mask=n < seq_len,
             other=0.0,
         ).to(tl.float32)
-        acc += tl.sum(k_signed * k_scale[:, None] + v_signed * v_scale[:, None])
+        k_sum = k_low + k_high
+        v_sum = v_low + v_high
+        acc += tl.sum(k_sum * k_scale[:, None] + v_sum * v_scale[:, None])
     tl.store(out_ptr + bh * tl.num_programs(1) + block_n, acc)
 
 
@@ -284,6 +290,7 @@ def run_kv_ab_profile(config: KVABConfig, device: torch.device | None = None) ->
     k, v, k_packed, v_packed, k_scale, v_scale, scratch = _make_inputs(config, device)
     grid = (config.batch_size * config.n_query_heads, triton.cdiv(config.seq_len, config.block_n))
     block_d = triton.next_power_of_2(config.head_dim)
+    block_p = triton.next_power_of_2(config.group_size // 2)
 
     def bf16_load():
         _bf16_kv_load_kernel[grid](
@@ -317,7 +324,7 @@ def run_kv_ab_profile(config: KVABConfig, device: torch.device | None = None) ->
             config.head_dim,
             config.group_size,
             BLOCK_N=config.block_n,
-            BLOCK_D=block_d,
+            BLOCK_P=block_p,
         )
 
     def int4_dequant():
@@ -337,7 +344,7 @@ def run_kv_ab_profile(config: KVABConfig, device: torch.device | None = None) ->
             config.head_dim,
             config.group_size,
             BLOCK_N=config.block_n,
-            BLOCK_D=block_d,
+            BLOCK_P=block_p,
         )
 
     for _ in range(config.warmup):
