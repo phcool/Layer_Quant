@@ -106,7 +106,12 @@ def patch_quamba_mixer_forward(mixer: torch.nn.Module) -> torch.nn.Module:
         cache_id = id(cache_params)
         inference_params = self._nemotron_cache_by_owner.get(cache_id)
         if inference_params is None:
-            inference_params = SimpleNamespace(key_value_memory_dict={}, seqlen_offset=0)
+            key_value_memory_dict = {}
+            if hasattr(self, "allocate_inference_cache"):
+                batch_size = hidden_states.shape[0]
+                max_seqlen = int(hidden_states.shape[1])
+                key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(batch_size, max_seqlen)
+            inference_params = SimpleNamespace(key_value_memory_dict=key_value_memory_dict, seqlen_offset=0)
             self._nemotron_cache_by_owner[cache_id] = inference_params
         else:
             # Quamba only checks whether seqlen_offset > 0 to select step()
