@@ -18,10 +18,13 @@ if str(REPO_ROOT) not in sys.path:
 
 from hybrid_quant.nemotron_8b_decode_eval import layer_groups, patch_attention_cache_in_blocks
 from scripts.quamba_compat.run_nemotron_quamba_full_w8a8 import (
+    build_reorder_params,
     calibration_ids,
     configure_nemotron_mamba_layers,
     ensure_quamba_on_path,
+    get_channel_stats_for_reorder,
     load_calibration_dataset,
+    reorder_nemotron_mamba_layers,
 )
 
 
@@ -187,6 +190,13 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--online-sample-idx", type=int, default=0)
     parser.add_argument("--layer-idx", type=int, default=-1, help="-1 means the last Nemotron Mamba layer.")
+    parser.add_argument("--apply-reorder", action="store_true", help="Apply Quamba2 channel/head weight reorder before profiling.")
+    parser.add_argument(
+        "--reorder-num-samples",
+        type=int,
+        default=None,
+        help="Calibration sample count for reorder stats; defaults to --num-samples.",
+    )
     args = parser.parse_args()
 
     ensure_quamba_on_path()
@@ -208,11 +218,26 @@ def main() -> None:
     patch_attention_cache_in_blocks(model)
     configure_nemotron_mamba_layers(model, mamba_layers, use_had_transform=False)
 
+    calibration_dataset = load_calibration_dataset(args.calib_source)
+    reorder_applied = False
+    if args.apply_reorder:
+        reorder_num_samples = args.reorder_num_samples or args.num_samples
+        channel_stats = get_channel_stats_for_reorder(
+            model,
+            tokenizer,
+            mamba_layers,
+            num_samples=reorder_num_samples,
+            seq_len=args.seq_len,
+            calibration_dataset=calibration_dataset,
+        )
+        reorder_params = build_reorder_params(model, mamba_layers, channel_stats)
+        reorder_nemotron_mamba_layers(model, mamba_layers, reorder_params)
+        reorder_applied = True
+
     mixer = model.backbone.layers[layer_idx].mixer
     capture = ActivationCapture(layer_idx, ngroups=mixer.ngroups)
     handles = make_hooks(model, layer_idx, capture)
 
-    calibration_dataset = load_calibration_dataset(args.calib_source)
     device = next(model.parameters()).device
     for sample_idx in tqdm(range(args.num_samples), desc="profile calibration"):
         capture.capture_online = sample_idx == args.online_sample_idx
@@ -230,6 +255,7 @@ def main() -> None:
     torch.save(
         {
             "layer_idx": layer_idx,
+            "reorder_applied": reorder_applied,
             "x_channel_max": capture.x_max,
             "x_channel_mean": capture.x_sum / max(1, capture.x_count),
             "B_group_max": torch.stack(capture.B_group_max_rows),
@@ -277,6 +303,8 @@ def main() -> None:
         "seq_len": args.seq_len,
         "online_sample_idx": args.online_sample_idx,
         "layer_idx": layer_idx,
+        "apply_reorder": args.apply_reorder,
+        "reorder_num_samples": args.reorder_num_samples or args.num_samples,
         "ngroups": mixer.ngroups,
         "headdim": mixer.headdim,
         "d_state": mixer.d_state,

@@ -7,13 +7,13 @@ from pathlib import Path
 import torch
 
 
-def sample_sorted_activation(
+def sample_activation(
     activation: torch.Tensor,
-    sorted_idx: torch.Tensor,
+    channel_idx: torch.Tensor,
     token_idx: torch.Tensor,
     dim_idx: torch.Tensor,
 ) -> torch.Tensor:
-    return activation[:, sorted_idx].index_select(0, token_idx).index_select(1, dim_idx)
+    return activation[:, channel_idx].index_select(0, token_idx).index_select(1, dim_idx)
 
 
 def plot_surface(
@@ -66,6 +66,11 @@ def main() -> None:
     parser.add_argument("--z-clip-quantile", type=float, default=0.999, help="Clip z/color range for readable spikes.")
     parser.add_argument("--view-elev", type=float, default=28.0)
     parser.add_argument("--view-azim", type=float, default=-58.0)
+    parser.add_argument(
+        "--model-order",
+        action="store_true",
+        help="Use the channel order produced by the model forward directly instead of sorting by calibrated max.",
+    )
     args = parser.parse_args()
 
     profile_path = Path(args.profile)
@@ -81,15 +86,22 @@ def main() -> None:
     if y.shape != x.shape:
         raise ValueError(f"Expected online y shape to match x, got x={tuple(x.shape)} y={tuple(y.shape)}")
 
-    sorted_idx = torch.argsort(x_channel_max, descending=True)
     seqlen, ndim = x.shape
+    if args.model_order:
+        channel_idx = torch.arange(ndim)
+        order_label = "model order"
+        title_prefix = "Reordered"
+    else:
+        channel_idx = torch.argsort(x_channel_max, descending=True)
+        order_label = "x_channel_max descending"
+        title_prefix = "Sorted"
 
     token_step = max(1, seqlen // args.token_points)
     dim_step = max(1, ndim // args.dim_points)
     token_idx = torch.arange(0, seqlen, token_step)[: args.token_points]
     dim_idx = torch.arange(0, ndim, dim_step)[: args.dim_points]
-    x_z = sample_sorted_activation(x, sorted_idx, token_idx, dim_idx)
-    y_z = sample_sorted_activation(y, sorted_idx, token_idx, dim_idx)
+    x_z = sample_activation(x, channel_idx, token_idx, dim_idx)
+    y_z = sample_activation(y, channel_idx, token_idx, dim_idx)
 
     x_z_clip = float(torch.quantile(x_z.reshape(-1), args.z_clip_quantile))
     y_z_clip = float(torch.quantile(y_z.reshape(-1), args.z_clip_quantile))
@@ -108,7 +120,7 @@ def main() -> None:
         dim_grid,
         x_z,
         z_clip=x_z_clip,
-        title="Sorted x activation",
+        title=f"{title_prefix} x activation",
         view_elev=args.view_elev,
         view_azim=args.view_azim,
     )
@@ -125,7 +137,7 @@ def main() -> None:
         dim_grid,
         x_z,
         z_clip=x_z_clip,
-        title="(a) Sorted x activation",
+        title=f"(a) {title_prefix} x activation",
         view_elev=args.view_elev,
         view_azim=args.view_azim,
     )
@@ -135,7 +147,7 @@ def main() -> None:
         dim_grid,
         y_z,
         z_clip=y_z_clip,
-        title="(b) Sorted y activation",
+        title=f"(b) {title_prefix} y activation",
         view_elev=args.view_elev,
         view_azim=args.view_azim,
     )
@@ -152,7 +164,7 @@ def main() -> None:
             "y_abs_activation": y_z,
             "x_clipped": x_z.clamp_max(x_z_clip),
             "y_clipped": y_z.clamp_max(y_z_clip),
-            "sorted_channel_idx": sorted_idx,
+            "channel_idx": channel_idx,
         },
         output_root / "figure3a_sorted_x_activation_3d_data.pt",
     )
@@ -172,7 +184,8 @@ def main() -> None:
                 "y_raw_max": float(y_z.max()),
                 "x_raw_p99": float(torch.quantile(x_z.reshape(-1), 0.99)),
                 "y_raw_p99": float(torch.quantile(y_z.reshape(-1), 0.99)),
-                "sort": "x_channel_max descending",
+                "sort": order_label,
+                "model_order": args.model_order,
                 "dims_axis": "displayed high-to-low to keep low-activation channels visible",
             },
             indent=2,
