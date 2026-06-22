@@ -29,6 +29,7 @@ class XActivationProfiler:
         self.channel_sum: torch.Tensor | None = None
         self.count = 0
         self.test_x: torch.Tensor | None = None
+        self.test_y: torch.Tensor | None = None
         self.capture_test = False
 
     @torch.no_grad()
@@ -44,28 +45,21 @@ class XActivationProfiler:
         self.channel_sum = cur_sum if self.channel_sum is None else self.channel_sum + cur_sum
         self.count += x_abs.shape[0]
 
+    @torch.no_grad()
+    def update_y(self, y: torch.Tensor) -> None:
+        if self.capture_test:
+            self.test_y = y.detach().float().cpu()[0]
 
-def plot_sorted_x(output_root: Path, test_x: torch.Tensor, order: torch.Tensor, *, token_points: int, dim_points: int, z_clip_quantile: float) -> dict:
-    x_sorted = test_x.abs()[:, order]
-    seqlen, ndim = x_sorted.shape
-    token_idx = torch.arange(0, seqlen, max(1, seqlen // token_points))[:token_points]
-    dim_idx = torch.arange(0, ndim, max(1, ndim // dim_points))[:dim_points]
-    z = x_sorted.index_select(0, token_idx).index_select(1, dim_idx)
-    z_clip = float(torch.quantile(z.reshape(-1), z_clip_quantile))
-    z_plot = z.clamp_max(z_clip)
-    token_grid, dim_grid = torch.meshgrid(token_idx.float(), dim_idx.float(), indexing="ij")
 
-    import matplotlib
+def sampled_sorted_activation(x: torch.Tensor, order: torch.Tensor, token_idx: torch.Tensor, dim_idx: torch.Tensor) -> torch.Tensor:
+    return x.abs()[:, order].index_select(0, token_idx).index_select(1, dim_idx)
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+
+def plot_surface(ax, token_grid: torch.Tensor, dim_grid: torch.Tensor, z: torch.Tensor, *, title: str, z_clip: float):
     from matplotlib import cm
     from matplotlib.colors import Normalize
 
-    fig = plt.figure(figsize=(8.8, 6.6), constrained_layout=True)
-    ax = fig.add_subplot(111, projection="3d")
-    ax.set_proj_type("ortho")
-    ax.set_box_aspect((1.45, 2.2, 0.62))
+    z_plot = z.clamp_max(z_clip)
     norm = Normalize(vmin=0.0, vmax=max(z_clip, 1e-12))
     colors = cm.coolwarm(norm(z_plot.numpy()))
     ax.plot_surface(
@@ -79,37 +73,82 @@ def plot_sorted_x(output_root: Path, test_x: torch.Tensor, order: torch.Tensor, 
         antialiased=False,
         shade=False,
     )
-    ax.set_title("Calibrated-sorted x activation")
-    ax.set_xlabel("Token")
-    ax.set_ylabel("Sorted dims")
-    ax.set_zlabel("|x activation|")
-    ax.set_xlim(float(token_idx.min()), float(token_idx.max()))
-    ax.set_ylim(float(dim_idx.max()), float(dim_idx.min()))
+    ax.set_title(title, pad=8)
+    ax.set_xlabel("Token", labelpad=8)
+    ax.set_ylabel("Sorted dims", labelpad=10)
+    ax.set_zlabel("|activation|", labelpad=8)
+    ax.set_xlim(float(token_grid.min()), float(token_grid.max()))
+    ax.set_ylim(float(dim_grid.min()), float(dim_grid.max()))
     ax.set_zlim(0.0, max(z_clip, 1e-12))
-    ax.view_init(elev=26, azim=-58)
-    mappable = cm.ScalarMappable(norm=norm, cmap=cm.coolwarm)
-    mappable.set_array([])
-    fig.colorbar(mappable, ax=ax, shrink=0.68, pad=0.06, label="|x activation|")
-    fig.savefig(output_root / "figure3_calibrated_sorted_x_activation_3d.png", dpi=260)
+    ax.set_xticks([0, 128, 256, 384, 511])
+    ax.set_yticks([0, 2000, 4000, 6000, 8000])
+    ax.tick_params(axis="both", which="major", labelsize=8, pad=2)
+    ax.tick_params(axis="z", which="major", labelsize=8, pad=2)
+    ax.view_init(elev=25, azim=-58)
+    return cm.ScalarMappable(norm=norm, cmap=cm.coolwarm)
+
+
+def plot_sorted_xy(
+    output_root: Path,
+    test_x: torch.Tensor,
+    test_y: torch.Tensor,
+    order: torch.Tensor,
+    *,
+    token_points: int,
+    dim_points: int,
+    z_clip_quantile: float,
+) -> dict:
+    seqlen, ndim = test_x.shape
+    token_idx = torch.arange(0, seqlen, max(1, seqlen // token_points))[:token_points]
+    dim_idx = torch.arange(0, ndim, max(1, ndim // dim_points))[:dim_points]
+    x_z = sampled_sorted_activation(test_x, order, token_idx, dim_idx)
+    y_z = sampled_sorted_activation(test_y, order, token_idx, dim_idx)
+    x_z_clip = float(torch.quantile(x_z.reshape(-1), z_clip_quantile))
+    y_z_clip = float(torch.quantile(y_z.reshape(-1), z_clip_quantile))
+    token_grid, dim_grid = torch.meshgrid(token_idx.float(), dim_idx.float(), indexing="ij")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(15.5, 6.8), constrained_layout=True)
+    ax_x = fig.add_subplot(121, projection="3d")
+    ax_y = fig.add_subplot(122, projection="3d")
+    for ax in (ax_x, ax_y):
+        ax.set_proj_type("ortho")
+        ax.set_box_aspect((1.45, 2.1, 0.62))
+    x_mappable = plot_surface(ax_x, token_grid, dim_grid, x_z, title="(a) Calibrated-sorted x activation", z_clip=x_z_clip)
+    y_mappable = plot_surface(ax_y, token_grid, dim_grid, y_z, title="(b) Calibrated-sorted y activation", z_clip=y_z_clip)
+    x_mappable.set_array([])
+    y_mappable.set_array([])
+    fig.colorbar(x_mappable, ax=ax_x, shrink=0.62, pad=0.04, label="|x activation|")
+    fig.colorbar(y_mappable, ax=ax_y, shrink=0.62, pad=0.04, label="|y activation|")
+    fig.savefig(output_root / "figure3_calibrated_sorted_x_y_activation_3d.png", dpi=260)
     plt.close(fig)
 
     torch.save(
         {
             "token_idx": token_idx,
             "dim_idx": dim_idx,
-            "z_abs_activation": z,
-            "z_clipped": z_plot,
+            "x_abs_activation": x_z,
+            "y_abs_activation": y_z,
+            "x_clipped": x_z.clamp_max(x_z_clip),
+            "y_clipped": y_z.clamp_max(y_z_clip),
             "channel_order": order,
         },
-        output_root / "figure3_calibrated_sorted_x_activation_3d_data.pt",
+        output_root / "figure3_calibrated_sorted_x_y_activation_3d_data.pt",
     )
     return {
         "source_shape": [seqlen, ndim],
-        "render_shape": list(z.shape),
+        "render_shape": list(x_z.shape),
         "z_clip_quantile": z_clip_quantile,
-        "z_clip": z_clip,
-        "z_raw_max": float(z.max()),
-        "z_raw_p99": float(torch.quantile(z.reshape(-1), 0.99)),
+        "x_z_clip": x_z_clip,
+        "y_z_clip": y_z_clip,
+        "x_raw_max": float(x_z.max()),
+        "y_raw_max": float(y_z.max()),
+        "x_raw_p99": float(torch.quantile(x_z.reshape(-1), 0.99)),
+        "y_raw_p99": float(torch.quantile(y_z.reshape(-1), 0.99)),
     }
 
 
@@ -145,7 +184,10 @@ def main() -> None:
 
     profiler = XActivationProfiler()
     mixer = model.backbone.layers[layer_idx].mixer
-    handle = mixer.x_conv_out.register_forward_hook(lambda _m, inputs, _out: profiler.update(inputs[0]))
+    handles = [
+        mixer.x_conv_out.register_forward_hook(lambda _m, inputs, _out: profiler.update(inputs[0])),
+        mixer.out_proj.register_forward_pre_hook(lambda _m, inputs: profiler.update_y(inputs[0])),
+    ]
 
     calibration_dataset = load_calibration_dataset(args.calib_source)
     device = next(model.parameters()).device
@@ -161,14 +203,16 @@ def main() -> None:
     test_ids = calibration_ids(tokenizer, args.test_sample_idx, args.seq_len, device, calibration_dataset)
     model(input_ids=test_ids, use_cache=False, return_dict=True)
     profiler.capture_test = False
-    handle.remove()
+    for handle in handles:
+        handle.remove()
 
-    if profiler.test_x is None:
-        raise RuntimeError("Missing test x activation.")
+    if profiler.test_x is None or profiler.test_y is None:
+        raise RuntimeError(f"Missing test activations: x={profiler.test_x is not None}, y={profiler.test_y is not None}")
 
-    plot_meta = plot_sorted_x(
+    plot_meta = plot_sorted_xy(
         output_root,
         profiler.test_x,
+        profiler.test_y,
         order,
         token_points=args.token_points,
         dim_points=args.dim_points,
@@ -183,6 +227,7 @@ def main() -> None:
             "x_channel_mean": profiler.channel_sum / max(1, profiler.count),
             "channel_order": order,
             "test_x": profiler.test_x,
+            "test_y": profiler.test_y,
             "mamba_layers": mamba_layers,
             "attention_layers": attention_layers,
             "mlp_layers": mlp_layers,
@@ -200,6 +245,7 @@ def main() -> None:
         "ordering": "calibration x_channel_max descending",
         "model_reordered": False,
         "post_forward_channel_sort": "fixed offline calibration order pi",
+        "dims_axis": "increasing sorted dim index",
         **plot_meta,
     }
     (output_root / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
