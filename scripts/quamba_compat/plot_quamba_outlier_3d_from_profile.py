@@ -164,7 +164,7 @@ def main() -> None:
         )
 
     write_csv(output_root / "figure4_head_profile_3d_coords.csv", rows)
-    title_base = f"Nemotron-H-8B layer {meta.get('layer_idx', 'unknown')}: Quamba2-style head profile 3D"
+    title_base = f"Layer {meta.get('layer_idx', 'unknown')} head profile 3D"
     plot_3d(
         output_root / "figure4_head_profile_3d_by_group.png",
         coords,
