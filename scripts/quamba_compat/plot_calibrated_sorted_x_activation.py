@@ -76,7 +76,7 @@ def plot_surface(ax, token_grid: torch.Tensor, dim_grid: torch.Tensor, z: torch.
     ax.set_title(title, pad=8)
     ax.set_xlabel("Token", labelpad=8)
     ax.set_ylabel("Sorted dims", labelpad=10)
-    ax.set_zlabel("|activation|", labelpad=8)
+    ax.set_zlabel("")
     ax.set_xlim(float(token_grid.min()), float(token_grid.max()))
     ax.set_ylim(float(dim_grid.min()), float(dim_grid.max()))
     ax.set_zlim(0.0, max(z_clip, 1e-12))
@@ -112,9 +112,12 @@ def plot_sorted_xy(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig = plt.figure(figsize=(15.5, 6.8), constrained_layout=True)
-    ax_x = fig.add_subplot(121, projection="3d")
-    ax_y = fig.add_subplot(122, projection="3d")
+    fig = plt.figure(figsize=(18.5, 7.2))
+    grid = fig.add_gridspec(1, 4, width_ratios=[1.0, 0.035, 1.0, 0.035], wspace=0.22)
+    ax_x = fig.add_subplot(grid[0, 0], projection="3d")
+    cax_x = fig.add_subplot(grid[0, 1])
+    ax_y = fig.add_subplot(grid[0, 2], projection="3d")
+    cax_y = fig.add_subplot(grid[0, 3])
     for ax in (ax_x, ax_y):
         ax.set_proj_type("ortho")
         ax.set_box_aspect((1.45, 2.1, 0.62))
@@ -122,9 +125,13 @@ def plot_sorted_xy(
     y_mappable = plot_surface(ax_y, token_grid, dim_grid, y_z, title="(b) Calibrated-sorted y activation", z_clip=y_z_clip)
     x_mappable.set_array([])
     y_mappable.set_array([])
-    fig.colorbar(x_mappable, ax=ax_x, shrink=0.62, pad=0.04, label="|x activation|")
-    fig.colorbar(y_mappable, ax=ax_y, shrink=0.62, pad=0.04, label="|y activation|")
-    fig.savefig(output_root / "figure3_calibrated_sorted_x_y_activation_3d.png", dpi=260)
+    x_colorbar = fig.colorbar(x_mappable, cax=cax_x)
+    x_colorbar.set_label("|x activation|", rotation=90, labelpad=10)
+    x_colorbar.ax.tick_params(labelsize=8)
+    y_colorbar = fig.colorbar(y_mappable, cax=cax_y)
+    y_colorbar.set_label("|y activation|", rotation=90, labelpad=10)
+    y_colorbar.ax.tick_params(labelsize=8)
+    fig.savefig(output_root / "figure3_calibrated_sorted_x_y_activation_3d.png", dpi=260, bbox_inches="tight")
     plt.close(fig)
 
     torch.save(
