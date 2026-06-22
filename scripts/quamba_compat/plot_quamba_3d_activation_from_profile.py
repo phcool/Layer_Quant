@@ -162,7 +162,7 @@ def main() -> None:
                 "profile": str(profile_path),
                 "output_root": str(output_root),
                 "source_shape": [seqlen, ndim],
-                "render_shape": list(z.shape),
+                "render_shape": list(x_z.shape),
                 "dim_points": int(len(dim_idx)),
                 "token_points": int(len(token_idx)),
                 "z_clip_quantile": args.z_clip_quantile,
