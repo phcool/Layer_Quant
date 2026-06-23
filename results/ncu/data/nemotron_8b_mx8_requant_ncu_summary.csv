@@ -1,3 +1,0 @@
-mode,captured_launches,mean_duration_ns,mean_long_scoreboard_pct,mean_lg_throttle_pct,mean_tensor_active_pct,mean_tensor_inst,mean_sm_throughput_pct,mean_sm_active_pct,mean_integer_inst,mean_local_load_bytes,mean_local_store_bytes,mean_local_memory_overhead,mean_duration_ms
-state_mx8,4,241496.0,0.125,0.0,0.48,262144.0,86.0275,,822083584.0,0.0,0.0,,0.241496
-kv_int4_state_mx8,4,241320.0,0.1225,0.0,0.48,262144.0,86.0325,,822083584.0,0.0,0.0,,0.24132
