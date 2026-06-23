@@ -45,7 +45,7 @@ The script also writes a CSV and PNG next to the JSONL output.
 ## Plot Existing Results
 
 ```bash
-/scratch2/wl730/conda_envs/hybrid/bin/python plot_decode_degradation_like_reference.py
+/scratch2/wl730/conda_envs/hybrid/bin/python scripts/plots/plot_decode_degradation_like_reference.py
 ```
 
 This produces `results/nemotron_8b_decode_mx8_like_reference.png`.
